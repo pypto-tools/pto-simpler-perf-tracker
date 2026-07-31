@@ -69,11 +69,11 @@ simpler/main commits
 
 ## 安装与目录规范
 
-工具名为 `simpler-perf-tracker`，唯一公开命令是
+工具名与远程仓库同为 `pto-simpler-perf-tracker`，唯一公开命令是
 `/usr/local/bin/pto-simpler-perf-tracker`。源码始终保留在 Git 仓库；正式安装默认布局为：
 
 ```text
-/home/pypto-tools/simpler-perf-tracker/
+/home/pypto-tools/pto-simpler-perf-tracker/
 ├── app/       # 由安装器更新的程序文件
 ├── config/    # perf-tracker.env；重装不覆盖
 ├── state/     # clone、worktree、报告和发布状态
@@ -85,7 +85,7 @@ simpler/main commits
 
 ```bash
 sudo ./install.sh --init-config
-sudoedit /home/pypto-tools/simpler-perf-tracker/config/perf-tracker.env
+sudoedit /home/pypto-tools/pto-simpler-perf-tracker/config/perf-tracker.env
 pto-simpler-perf-tracker --recent 1 -m 1 -r 10
 ```
 
@@ -100,7 +100,7 @@ runtime/{config,state,logs,tmp}
 ```
 
 源码模式配置文件是 `runtime/config/perf-tracker.env`；安装模式配置文件是
-`/home/pypto-tools/simpler-perf-tracker/config/perf-tracker.env`。也可用
+`/home/pypto-tools/pto-simpler-perf-tracker/config/perf-tracker.env`。也可用
 `PTO_CONFIG_FILE` 显式指定配置文件。配置中不要写入日志或提交到 Git。
 
 ## 快速开始
@@ -223,7 +223,7 @@ FEISHU_WIKI_TOKEN=xxxxxxxx
 
 ```cron
 CRON_TZ=Asia/Shanghai
-0 22 * * * source /path/to/conda.sh && conda activate YOUR_ENV && /usr/local/bin/pto-simpler-perf-tracker --push >> /home/pypto-tools/simpler-perf-tracker/logs/cron.log 2>&1
+0 22 * * * source /path/to/conda.sh && conda activate YOUR_ENV && /usr/local/bin/pto-simpler-perf-tracker --push >> /home/pypto-tools/pto-simpler-perf-tracker/logs/cron.log 2>&1
 ```
 
 `CRON_TZ` 只负责时区，机器系统时钟仍应由 NTP 保持准确。报告中的时间戳会优先读取

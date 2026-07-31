@@ -5,7 +5,8 @@ set -euo pipefail
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOLS_ROOT="/home/pypto-tools"
 BIN_DIR="/usr/local/bin"
-TOOL_NAME="simpler-perf-tracker"
+TOOL_NAME="pto-simpler-perf-tracker"
+LEGACY_TOOL_NAME="simpler-perf-tracker"
 COMMAND_NAME="pto-simpler-perf-tracker"
 INIT_CONFIG=0
 RUN_USER="${SUDO_USER:-$(id -un)}"
@@ -15,7 +16,7 @@ usage() {
   cat <<'EOF'
 Usage: ./install.sh [--tools-root DIR] [--init-config] [--bin-dir DIR]
 
-Install the application as <tools-root>/simpler-perf-tracker/app and expose
+Install the application as <tools-root>/pto-simpler-perf-tracker/app and expose
 pto-simpler-perf-tracker in /usr/local/bin. Existing config and state are kept.
 
 Options:
@@ -37,6 +38,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 TOOL_ROOT="$TOOLS_ROOT/$TOOL_NAME"
+LEGACY_TOOL_ROOT="$TOOLS_ROOT/$LEGACY_TOOL_NAME"
+if [[ -d "$LEGACY_TOOL_ROOT" && ! -e "$TOOL_ROOT" ]]; then
+  mv "$LEGACY_TOOL_ROOT" "$TOOL_ROOT"
+  echo "migrated $LEGACY_TOOL_ROOT -> $TOOL_ROOT"
+elif [[ -e "$LEGACY_TOOL_ROOT" && -e "$TOOL_ROOT" ]]; then
+  echo "error: both legacy and canonical tool directories exist; merge them first" >&2
+  exit 1
+fi
 APP_DIR="$TOOL_ROOT/app"
 mkdir -p "$TOOL_ROOT" "$TOOL_ROOT/config" "$TOOL_ROOT/state" \
   "$TOOL_ROOT/logs" "$TOOL_ROOT/tmp" "$BIN_DIR"

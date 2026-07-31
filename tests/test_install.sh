@@ -10,7 +10,7 @@ TOOLS_ROOT="$TEST_ROOT/tools"
 BIN_DIR="$TEST_ROOT/bin"
 "$REPO_DIR/install.sh" --tools-root "$TOOLS_ROOT" --bin-dir "$BIN_DIR" --init-config >/dev/null
 
-TOOL_ROOT="$TOOLS_ROOT/simpler-perf-tracker"
+TOOL_ROOT="$TOOLS_ROOT/pto-simpler-perf-tracker"
 for dir in app config state logs tmp; do
   [[ -d "$TOOL_ROOT/$dir" ]]
 done
@@ -42,5 +42,19 @@ preserved" ]]
 source_paths="$({ SCRIPT_DIR="$REPO_DIR"; source "$REPO_DIR/runtime_paths.sh"; printf '%s\n%s\n' "$CONFIG_DIR" "$STATE_DIR"; })"
 [[ "$source_paths" == "$REPO_DIR/runtime/config
 $REPO_DIR/runtime/state" ]]
+
+# Existing installations are migrated as a whole when the canonical directory is absent.
+MIGRATION_ROOT="$TEST_ROOT/migration-tools"
+mkdir -p "$MIGRATION_ROOT/simpler-perf-tracker/config" \
+  "$MIGRATION_ROOT/simpler-perf-tracker/state"
+printf 'legacy-config\n' > "$MIGRATION_ROOT/simpler-perf-tracker/config/sentinel"
+printf 'legacy-state\n' > "$MIGRATION_ROOT/simpler-perf-tracker/state/sentinel"
+"$REPO_DIR/install.sh" --tools-root "$MIGRATION_ROOT" \
+  --bin-dir "$TEST_ROOT/migration-bin" >/dev/null
+[[ ! -e "$MIGRATION_ROOT/simpler-perf-tracker" ]]
+grep -qx 'legacy-config' \
+  "$MIGRATION_ROOT/pto-simpler-perf-tracker/config/sentinel"
+grep -qx 'legacy-state' \
+  "$MIGRATION_ROOT/pto-simpler-perf-tracker/state/sentinel"
 
 echo "install/layout tests passed"

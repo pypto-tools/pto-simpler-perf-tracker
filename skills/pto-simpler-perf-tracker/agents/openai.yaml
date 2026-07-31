@@ -1,0 +1,4 @@
+interface:
+  display_name: "PTO Simpler Perf Tracker"
+  short_description: "Run and inspect Simpler NPU performance tracking safely"
+  default_prompt: "Use $pto-simpler-perf-tracker to configure or run a safe Simpler performance tracking workflow."

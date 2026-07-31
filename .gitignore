@@ -1,0 +1,23 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Python caches and virtual environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Runtime state and generated benchmark output
+work/
+*.log
+*.lock
+*.pid
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+*~
+*.swp

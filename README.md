@@ -28,6 +28,35 @@ simpler/main commits
 `simpler` 使用 squash merge，因此 `main` 上的一个 commit 就对应一个 PR 的最终状态。
 `--recent N` 表示测试最近的 N 个 PR，顺序为从新到旧。
 
+## 核心机制
+
+整个工具可以简单理解为“选择 commit → 隔离测试 → 汇总对比 → 增量发布”：
+
+1. **选择 commit**
+   工具从 `upstream/main` 读取指定时间窗口或最近 N 个 commit。由于项目采用
+   squash merge，每个 commit 可以直接视为一个 PR，无需再调用 GitHub API 查询 PR。
+
+2. **隔离构建和测试**
+   每个 commit 都使用独立的 Git worktree，避免不同版本的源码、构建目录和 Python
+   环境互相污染。工具会在该 worktree 中重新构建 simpler，然后执行项目自带的
+   `benchmark_rounds.sh`。
+
+3. **按 NPU 并行分片**
+   多卡运行时，commit 列表会被拆成多个 shard，每个 shard 通过 `task-submit`
+   绑定一张 NPU。某张卡异常时，未完成的 commit 会换卡重试，不会要求整批任务重跑。
+
+4. **原始数据与报告分离**
+   benchmark 结果先按完成顺序追加到原始 JSONL/Markdown，确保中断时已完成的数据仍然
+   可用。后处理再负责合并重试记录、恢复 commit 顺序、标记设备，并计算相邻 commit
+   的 Device/Orchestration 耗时变化。
+
+5. **按 SHA 增量发布**
+   飞书发布状态保存在 `work/` 中。已发布的 commit SHA 不会重复插入；日常任务因此可以
+   使用重叠的 36 小时时间窗口，在自动补漏的同时避免生成重复报告。
+
+为保证趋势一致，已经发布过的 commit 会沿用首次发布的测量值。这样即使后续重叠窗口
+再次测到同一 commit，更新 commit 的性能 Δ 仍然与飞书中已经展示的基线一致。
+
 ## 快速开始
 
 ### 1. 准备环境

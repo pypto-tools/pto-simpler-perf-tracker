@@ -9,7 +9,7 @@
 #   ./run.sh                       # daily incremental: last 36h of newly-landed PRs
 #   ./run.sh --recent 100          # most-recent 100 PRs (initial backfill)
 #   ./run.sh --since '3 days ago'  # custom window
-#   ./run.sh --recent 50 --push    # also push processed md to Feishu (needs .env)
+#   ./run.sh --recent 50 --push    # also push processed md to Feishu (needs config)
 #
 # Flags:
 #   --since DATE   git date window (default: '36 hours ago'). The >24h window
@@ -20,10 +20,18 @@
 #   -m M           parallel shards / NPUs (default 4)
 #   -r ROUNDS      benchmark rounds per case (default 100)
 #   --workdir DIR  outputs/worktrees/clone dir (default <script>/work)
-#   --push         push processed md to Feishu (loads .env)
+#   --push         push processed md to Feishu (loads config/perf-tracker.env)
 
 set -euo pipefail
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT_PATH" ]]; do
+  LINK_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+  SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+  [[ "$SCRIPT_PATH" = /* ]] || SCRIPT_PATH="$LINK_DIR/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+# shellcheck source=runtime_paths.sh
+. "$SCRIPT_DIR/runtime_paths.sh"
 # 时间取自网络（本服务器时钟被改过，不可信）；网络不可达时回退本机时间。
 net_now() { python3 "$SCRIPT_DIR/nettime.py" '%Y-%m-%d %H:%M:%S' 2>/dev/null || date '+%F %T'; }
 # Egress convention (see `pypto-setup`): clone/fetch over SSH first, fall back
@@ -33,9 +41,8 @@ REPO_SSH="git@github.com:hw-native-sys/simpler.git"
 REPO_HTTPS="https://github.com/hw-native-sys/simpler"
 REPO_URL="$REPO_HTTPS"
 
-# Load app creds + notify target early so a failure at any stage can DM. The
-# push step (step 4) relies on the same vars, so this single load covers both.
-[[ -f "$SCRIPT_DIR/.env" ]] && { set -a; . "$SCRIPT_DIR/.env"; set +a; }
+# Credentials and notification settings were loaded from CONFIG_FILE by
+# runtime_paths.sh. They are never copied into app/ during installation.
 
 # On any non-zero exit, send a Feishu failure card naming the stage that broke.
 # Idempotent (trap + explicit calls share NOTIFIED); a missing/unconfigured
@@ -50,7 +57,7 @@ notify_failure() {
     --line "**阶段**: $STAGE" \
     --line "**原因**: $1" \
     --line "**时间**: $(net_now)" \
-    --line "日志: \`work/cron.log\`" >/dev/null 2>&1 \
+    --line "日志目录: \`$LOG_DIR\`" >/dev/null 2>&1 \
     || echo "[run] (feishu notify skipped/failed)"
 }
 trap 'rc=$?; if [[ $rc -ne 0 ]]; then notify_failure "run.sh exited $rc"; fi' EXIT
@@ -61,7 +68,7 @@ SINCE="36 hours ago"
 RECENT=""
 M=1
 ROUNDS=100
-WORKDIR="$SCRIPT_DIR/work"
+WORKDIR="$STATE_DIR/work"
 PUSH=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -148,8 +155,7 @@ git_retry git -C "$REPO" fetch upstream main --quiet || {
 # does not re-clone pto-isa over ssh (fragile on this box). Override with
 # PERF_PTO_ISA_ROOT; falls back to a known local checkout.
 if [[ ! -d "$REPO/build/pto-isa" && -z "${PTO_ISA_ROOT:-}" ]]; then
-  for cand in "${PERF_PTO_ISA_ROOT:-}" \
-              /data/m00956180/runtime/simpler_wc/build/pto-isa; do
+  for cand in "${PERF_PTO_ISA_ROOT:-}"; do
     if [[ -n "$cand" && -d "$cand" ]]; then export PTO_ISA_ROOT="$cand"; break; fi
   done
 fi
@@ -176,7 +182,7 @@ else
 fi
 
 # 4. Optional: publish to Feishu (per-month docs + index; prepend newest).
-# .env was already sourced at the top of this script.
+# CONFIG_FILE was already sourced at the top of this script.
 if [[ "$PUSH" -eq 1 ]]; then
   STAGE="feishu publish"
   python "$SCRIPT_DIR/feishu_perf_report.py" \

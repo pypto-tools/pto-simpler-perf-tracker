@@ -10,6 +10,7 @@ __pycache__/
 venv/
 
 # Runtime state and generated benchmark output
+runtime/
 work/
 *.log
 *.lock

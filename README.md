@@ -57,6 +57,42 @@ simpler/main commits
 为保证趋势一致，已经发布过的 commit 会沿用首次发布的测量值。这样即使后续重叠窗口
 再次测到同一 commit，更新 commit 的性能 Δ 仍然与飞书中已经展示的基线一致。
 
+## 安装与目录规范
+
+工具名为 `simpler-perf-tracker`，唯一公开命令是
+`/usr/local/bin/pto-simpler-perf-tracker`。源码始终保留在 Git 仓库；正式安装默认布局为：
+
+```text
+/home/pypto-tools/simpler-perf-tracker/
+├── app/       # 由安装器更新的程序文件
+├── config/    # perf-tracker.env；重装不覆盖
+├── state/     # clone、worktree、报告和发布状态
+├── logs/      # cron 等运行日志
+└── tmp/       # 临时文件
+```
+
+首次安装并生成配置模板：
+
+```bash
+sudo ./install.sh --init-config
+sudoedit /home/pypto-tools/simpler-perf-tracker/config/perf-tracker.env
+pto-simpler-perf-tracker --recent 1 -m 1 -r 10
+```
+
+后续升级只需再次执行 `sudo ./install.sh`。安装器只替换 `app/`，不会覆盖 `config/`，
+也不会删除 `state/`；安装过程不会启动 benchmark、联网、发布消息或执行其他业务操作。
+可用 `--tools-root DIR` 改变部署根目录。`--bin-dir DIR` 主要供打包和隔离测试使用。
+
+直接从源码运行时不需要安装，`./run.sh` 会使用仓库内被 Git 忽略的 `runtime/`：
+
+```text
+runtime/{config,state,logs,tmp}
+```
+
+源码模式配置文件是 `runtime/config/perf-tracker.env`；安装模式配置文件是
+`/home/pypto-tools/simpler-perf-tracker/config/perf-tracker.env`。也可用
+`PTO_CONFIG_FILE` 显式指定配置文件。配置中不要写入日志或提交到 Git。
+
 ## 快速开始
 
 ### 1. 准备环境
@@ -71,14 +107,15 @@ simpler/main commits
 先激活包含 simpler 构建依赖的 Python 环境，然后执行：
 
 ```bash
-git clone https://github.com/better-ci/tool-simpler-perf-tracker.git
+git clone https://github.com/pypto-tools/tool-simpler-perf-tracker.git
 cd tool-simpler-perf-tracker
 
 # 最小验证：最近 1 个 PR，1 张 NPU，每个 case 运行 10 轮
 ./run.sh --recent 1 -m 1 -r 10
 ```
 
-工具会自动把 simpler clone 到 `work/simpler`，不要求从 simpler 仓库内运行。
+源码模式会自动把 simpler clone 到 `runtime/state/work/simpler`，不要求从 simpler
+仓库内运行；安装模式则写到统一部署目录的 `state/work/simpler`。
 
 ### 2. 常用命令
 
@@ -102,7 +139,7 @@ cd tool-simpler-perf-tracker
 | `--recent N` | 测试最近 N 个 commit；与 `--since` 二选一 | — |
 | `-m M` | 并行 shard / NPU 数量 | `1` |
 | `-r ROUNDS` | 每个 benchmark case 的轮数 | `100` |
-| `--workdir DIR` | clone、worktree 和报告目录 | `./work` |
+| `--workdir DIR` | clone、worktree 和报告目录 | `<state>/work` |
 | `--push` | 将处理后的结果增量发布到飞书 | 关闭 |
 
 默认窗口使用 36 小时而不是 24 小时，让下一次日常任务可以补回一次失败的运行。
@@ -110,7 +147,7 @@ cd tool-simpler-perf-tracker
 
 ## 输出
 
-所有运行数据默认写入 `work/`，该目录不会提交到 Git：
+所有持久运行数据默认写入 `<state>/work/`。源码模式的整个 `runtime/` 都不会提交到 Git：
 
 | 文件或目录 | 内容 |
 | --- | --- |
@@ -124,10 +161,11 @@ cd tool-simpler-perf-tracker
 
 ## 飞书发布（可选）
 
-复制配置模板并填入自己的应用凭据：
+源码模式可复制配置模板并填入自己的应用凭据：
 
 ```bash
-cp .env.example .env
+mkdir -p runtime/config
+cp .env.example runtime/config/perf-tracker.env
 ```
 
 至少配置：
@@ -138,8 +176,9 @@ FEISHU_APP_SECRET=xxxxxxxx
 FEISHU_WIKI_TOKEN=xxxxxxxx
 ```
 
-也可以使用 `FEISHU_DOCX_TOKEN` 指向普通文档。`.env` 已加入忽略规则，不要把真实密钥
-提交到仓库。
+也可以使用 `FEISHU_DOCX_TOKEN` 指向普通文档。正式安装推荐使用
+`./install.sh --init-config` 创建权限为 `0600` 的配置。不要把真实密钥提交到仓库，
+也不要将配置内容输出到日志。
 
 使用 `--push` 后，工具会维护按月拆分的性能报告和索引，并分别发布：
 
@@ -174,7 +213,7 @@ FEISHU_WIKI_TOKEN=xxxxxxxx
 
 ```cron
 CRON_TZ=Asia/Shanghai
-0 22 * * * cd /path/to/tool-simpler-perf-tracker && source /path/to/conda.sh && conda activate YOUR_ENV && PATH=/usr/local/bin:$PATH ./run.sh --push >> work/cron.log 2>&1
+0 22 * * * source /path/to/conda.sh && conda activate YOUR_ENV && /usr/local/bin/pto-simpler-perf-tracker --push >> /home/pypto-tools/simpler-perf-tracker/logs/cron.log 2>&1
 ```
 
 `CRON_TZ` 只负责时区，机器系统时钟仍应由 NTP 保持准确。报告中的时间戳会优先读取
@@ -192,9 +231,21 @@ HTTP `Date` 响应头；网络不可用时才回退到本机时间并输出 `LOC
 | `notify_feishu.py` | 发送运行失败通知 |
 | `nettime.py` | 获取不依赖本机系统时钟的报告时间 |
 | `backfill.sh` | 历史数据回填辅助脚本 |
+| `install.sh` | 安装或升级 `app/`，并维护唯一公开命令 |
+| `runtime_paths.sh` | 解析源码/安装模式的配置与状态目录 |
 
 如果机器不需要 `task-submit` 就能直接使用 NPU，也可以单独调用核心脚本：
 
 ```bash
 python perf_history.py --repo /path/to/simpler -d 0 [其他参数]
+```
+
+## 验证
+
+安装与目录行为测试不运行 benchmark，也不访问外部服务：
+
+```bash
+bash tests/test_install.sh
+python3 -m unittest discover -s tests
+git diff --check
 ```

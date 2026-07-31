@@ -35,7 +35,15 @@
 #   ./backfill.sh --once                # one batch then stop (debug)
 
 set -euo pipefail
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT_PATH" ]]; do
+  LINK_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+  SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+  [[ "$SCRIPT_PATH" = /* ]] || SCRIPT_PATH="$LINK_DIR/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+# shellcheck source=runtime_paths.sh
+. "$SCRIPT_DIR/runtime_paths.sh"
 REPO_URL="https://github.com/hw-native-sys/simpler"
 
 # Harness boundary: 47fb6b68 = "Add benchmark script ... (#227)" first added
@@ -54,7 +62,7 @@ DEVICES="${PERF_DEVICES:-3 4 5 6 8 9 10 11}"
 ROUNDS=100
 BATCH=32
 LIMIT=0          # 0 = no cap (churn every undone commit); else stop after N new
-WORKDIR="$SCRIPT_DIR/work"
+WORKDIR="$STATE_DIR/work"
 PUSH=1
 ONCE=0
 REBUILD=0        # overwrite the doc from scratch (clear + rewrite, ordered)
@@ -109,8 +117,7 @@ git -C "$REPO" fetch upstream main --quiet
 
 # Reuse an existing pto-isa clone (same fallback as run.sh).
 if [[ ! -d "$REPO/build/pto-isa" && -z "${PTO_ISA_ROOT:-}" ]]; then
-  for cand in "${PERF_PTO_ISA_ROOT:-}" \
-              /data/m00956180/runtime/simpler_wc/build/pto-isa; do
+  for cand in "${PERF_PTO_ISA_ROOT:-}"; do
     if [[ -n "$cand" && -d "$cand" ]]; then export PTO_ISA_ROOT="$cand"; break; fi
   done
 fi
@@ -220,7 +227,6 @@ if [[ -s "$ARCHIVE" ]]; then
   # Publish once. Normally --append (older commits to the bottom). In rebuild
   # mode --rebuild clears the docs and rewrites the whole sorted set in order.
   if [[ "$PUSH" -eq 1 ]]; then
-    [[ -f "$SCRIPT_DIR/.env" ]] && set -a && . "$SCRIPT_DIR/.env" && set +a
     PUBLISH_MODE="--append"
     [[ "$REBUILD" -eq 1 ]] && PUBLISH_MODE="--rebuild"
     python "$SCRIPT_DIR/feishu_perf_report.py" \

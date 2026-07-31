@@ -63,6 +63,7 @@ chmod 0755 "$STAGE_DIR/run.sh" "$STAGE_DIR/backfill.sh" \
   "$STAGE_DIR/perf_history_parallel.sh" "$STAGE_DIR/perf_history.py" \
   "$STAGE_DIR/perf_finalize.py" "$STAGE_DIR/feishu_perf_report.py" \
   "$STAGE_DIR/notify_feishu.py" "$STAGE_DIR/nettime.py"
+chmod 0755 "$STAGE_DIR"
 
 OLD_APP=""
 if [[ -e "$APP_DIR" ]]; then

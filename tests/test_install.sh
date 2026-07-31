@@ -15,6 +15,7 @@ for dir in app config state logs tmp; do
   [[ -d "$TOOL_ROOT/$dir" ]]
 done
 [[ "$(stat -c '%a' "$TOOLS_ROOT")" == "755" ]]
+[[ "$(stat -c '%a' "$TOOL_ROOT/app")" == "755" ]]
 for dir in config state logs tmp; do
   [[ "$(stat -c '%a' "$TOOL_ROOT/$dir")" == "755" ]]
 done

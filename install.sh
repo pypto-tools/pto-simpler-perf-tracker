@@ -8,6 +8,8 @@ BIN_DIR="/usr/local/bin"
 TOOL_NAME="simpler-perf-tracker"
 COMMAND_NAME="pto-simpler-perf-tracker"
 INIT_CONFIG=0
+RUN_USER="${SUDO_USER:-$(id -un)}"
+RUN_GROUP="$(id -gn "$RUN_USER")"
 
 usage() {
   cat <<'EOF'
@@ -41,6 +43,12 @@ mkdir -p "$TOOL_ROOT" "$TOOL_ROOT/config" "$TOOL_ROOT/state" \
 TOOL_ROOT="$(cd "$TOOL_ROOT" && pwd)"
 BIN_DIR="$(cd "$BIN_DIR" && pwd)"
 APP_DIR="$TOOL_ROOT/app"
+# Programs remain administrator-managed. Mutable directories belong to the
+# user who invoked sudo so the public command never needs root at runtime.
+chown "$RUN_USER:$RUN_GROUP" "$TOOL_ROOT/config" "$TOOL_ROOT/state" \
+  "$TOOL_ROOT/logs" "$TOOL_ROOT/tmp"
+chmod 0755 "$TOOLS_ROOT" "$TOOL_ROOT" "$TOOL_ROOT/config" \
+  "$TOOL_ROOT/state" "$TOOL_ROOT/logs" "$TOOL_ROOT/tmp"
 
 STAGE_DIR="$(mktemp -d "$TOOL_ROOT/.app.install.XXXXXX")"
 cleanup() { rm -rf -- "$STAGE_DIR"; }
@@ -67,6 +75,7 @@ if [[ -n "$OLD_APP" ]]; then rm -rf -- "$OLD_APP"; fi
 
 if [[ "$INIT_CONFIG" -eq 1 && ! -e "$TOOL_ROOT/config/perf-tracker.env" ]]; then
   install -m 0600 "$APP_DIR/.env.example" "$TOOL_ROOT/config/perf-tracker.env"
+  chown "$RUN_USER:$RUN_GROUP" "$TOOL_ROOT/config/perf-tracker.env"
 fi
 
 ln -sfn "$APP_DIR/run.sh" "$BIN_DIR/$COMMAND_NAME"

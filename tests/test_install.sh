@@ -14,6 +14,10 @@ TOOL_ROOT="$TOOLS_ROOT/simpler-perf-tracker"
 for dir in app config state logs tmp; do
   [[ -d "$TOOL_ROOT/$dir" ]]
 done
+[[ "$(stat -c '%a' "$TOOLS_ROOT")" == "755" ]]
+for dir in config state logs tmp; do
+  [[ "$(stat -c '%a' "$TOOL_ROOT/$dir")" == "755" ]]
+done
 [[ -L "$BIN_DIR/pto-simpler-perf-tracker" ]]
 [[ "$(readlink "$BIN_DIR/pto-simpler-perf-tracker")" == "$TOOL_ROOT/app/run.sh" ]]
 [[ -x "$BIN_DIR/pto-simpler-perf-tracker" ]]

@@ -1,10 +1,20 @@
 # Simpler Perf Tracker
 
-面向 [hw-native-sys/simpler](https://github.com/hw-native-sys/simpler) 的 PR 级性能追踪工具。
-它会逐个检出 `main` 上的 squash commit，在一张或多张 NPU 上重新构建并执行 benchmark，
-计算相邻 PR 的性能变化，最终生成 Markdown/JSONL 报告，也可以增量发布到飞书。
+> 面向 [hw-native-sys/simpler](https://github.com/hw-native-sys/simpler) 的 PR 级 NPU 性能追踪工具。
+
+工具会逐个检出 `main` 上的 squash commit，在一张或多张 NPU 上重新构建并执行
+benchmark，计算相邻 PR 的性能变化，最终生成 Markdown/JSONL 报告，也可以增量发布到飞书。
 
 > 适合用来回答：最近哪个 PR 让 Device 或 Orchestration 耗时发生了变化？
+
+当前主要支持：
+
+- 按最近 PR 数量或时间窗口选择 commit，并用独立 worktree 隔离构建；
+- 在多张 NPU 上并行测试，遇到异常设备时自动换卡重试；
+- 汇总性能变化、生成本地报告，并按 commit SHA 去重发布飞书月报。
+
+安装后的统一入口是 `pto-simpler-perf-tracker`；不安装时也可直接运行仓库中的
+`./run.sh`，运行数据会写入 Git 忽略的 `runtime/`。
 
 ## 工作流程
 

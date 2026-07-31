@@ -107,8 +107,8 @@ runtime/{config,state,logs,tmp}
 先激活包含 simpler 构建依赖的 Python 环境，然后执行：
 
 ```bash
-git clone https://github.com/pypto-tools/tool-simpler-perf-tracker.git
-cd tool-simpler-perf-tracker
+git clone https://github.com/pypto-tools/pto-simpler-perf-tracker.git
+cd pto-simpler-perf-tracker
 
 # 最小验证：最近 1 个 PR，1 张 NPU，每个 case 运行 10 轮
 ./run.sh --recent 1 -m 1 -r 10

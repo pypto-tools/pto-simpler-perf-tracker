@@ -63,15 +63,18 @@ STAGE_DIR="$(mktemp -d "$TOOL_ROOT/.app.install.XXXXXX")"
 cleanup() { rm -rf -- "$STAGE_DIR"; }
 trap cleanup EXIT
 
-for file in run.sh backfill.sh perf_history_parallel.sh perf_history.py \
-  perf_finalize.py feishu_perf_report.py notify_feishu.py nettime.py \
-  runtime_paths.sh .env.example README.md; do
+for file in run.sh ci_weekly.sh backfill.sh catchup_once.sh perf_history_parallel.sh perf_history.py \
+  perf_finalize.py feishu_perf_report.py ci_weekly_report.py notify_feishu.py nettime.py \
+  scheduled_run.py runtime_paths.sh .env.example README.md; do
   install -m 0644 "$SOURCE_DIR/$file" "$STAGE_DIR/$file"
 done
-chmod 0755 "$STAGE_DIR/run.sh" "$STAGE_DIR/backfill.sh" \
+chmod 0755 "$STAGE_DIR/run.sh" "$STAGE_DIR/ci_weekly.sh" "$STAGE_DIR/backfill.sh" \
+  "$STAGE_DIR/catchup_once.sh" \
   "$STAGE_DIR/perf_history_parallel.sh" "$STAGE_DIR/perf_history.py" \
   "$STAGE_DIR/perf_finalize.py" "$STAGE_DIR/feishu_perf_report.py" \
-  "$STAGE_DIR/notify_feishu.py" "$STAGE_DIR/nettime.py"
+  "$STAGE_DIR/ci_weekly_report.py" \
+  "$STAGE_DIR/notify_feishu.py" "$STAGE_DIR/nettime.py" \
+  "$STAGE_DIR/scheduled_run.py"
 chmod 0755 "$STAGE_DIR"
 
 OLD_APP=""

@@ -46,6 +46,14 @@ except Exception:  # 兜底：缺失时退回本机时间，不阻断报告
 
 BASE = "https://open.feishu.cn/open-apis"
 
+# Feishu is reachable directly from the benchmark host.  urllib's default
+# opener silently inherits HTTP(S)_PROXY from the login environment, which can
+# route open.feishu.cn through a local GitHub proxy and make CONNECT fail with
+# 403.  Keep Feishu traffic isolated from those unrelated proxy settings.  The
+# shared _api helper is also used by notify_feishu.py, so report publication and
+# failure notifications follow the same direct-connect policy.
+_FEISHU_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
 # One row per commit; the benchmark's summary block is stored verbatim in the
 # last cell (format-agnostic -- whatever columns the run printed).
 HEADER = ["timestamp", "ref", "runtime", "platform", "rounds",
@@ -61,7 +69,7 @@ def _api(method, url, token=None, body=None, retries=3):
     for _ in range(retries):
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=60) as r:
+            with _FEISHU_OPENER.open(req, timeout=60) as r:
                 payload = json.loads(r.read().decode())
             if payload.get("code", 0) != 0:
                 sys.exit(f"Feishu API error {payload.get('code')}: {payload.get('msg')}")
@@ -217,6 +225,23 @@ def clear_doc(token, doc_id):
              body={"start_index": n - k, "end_index": n})
 
 
+def sync_month_index(token, index_doc, months,
+                     domain="hw-native-sys.feishu.cn"):
+    """Rewrite the small month index in newest-first order.
+
+    Month documents can be created later than their neighbours when an old
+    benchmark is retried.  Ordering links by creation time therefore drifts;
+    derive it from the month keys every time instead.
+    """
+    clear_doc(token, index_doc)
+    links = [
+        _text_block(f"📅 {month} → https://{domain}/docx/{months[month]}")
+        for month in sorted(months, reverse=True)
+    ]
+    if links:
+        docx_append(token, index_doc, links)
+
+
 # --- native Feishu tables (from processed jsonl) ---------------------------
 
 METRICS = ["Host", "Device", "Total", "Sched", "Orch"]
@@ -280,7 +305,7 @@ def _cellv(cur, prev):
     return s
 
 
-def _commit_descendants(entry, prev, counter):
+def _commit_descendants(entry, prev, counter, prev_host=None):
     """Build (children_ids, descendants) for one commit: heading + meta + table."""
     def nid():
         counter[0] += 1
@@ -306,42 +331,96 @@ def _commit_descendants(entry, prev, counter):
     metrics = entry.get("metrics") or {}
     if not metrics:
         cb = nid()
-        desc.append({"block_id": cb, **_code_block(entry.get("summary") or "(no data)")})
+        if entry.get("device_status") == "disabled":
+            block = _text_block("Device benchmark disabled; host-only run.")
+        else:
+            block = _code_block(entry.get("summary") or "(no data)")
+        desc.append({"block_id": cb, **block})
         top.append(cb)
-        return top, desc
+    else:
+        cols = entry.get("present") or METRICS
+        headers = ["Example"] + [f"{c}(us)" for c in cols]
+        examples = sorted(metrics)
+        cell_ids = []
 
-    cols = entry.get("present") or METRICS
-    headers = ["Example"] + [f"{c}(us)" for c in cols]
-    examples = sorted(metrics)
-    cell_ids = []
+        def add_cell(text):
+            tb, cb = nid(), nid()
+            desc.append({"block_id": tb, **_text_block(str(text))})
+            desc.append({"block_id": cb, "block_type": 32, "table_cell": {},
+                         "children": [tb]})
+            cell_ids.append(cb)
 
-    def add_cell(text):
-        tb, cb = nid(), nid()
-        desc.append({"block_id": tb, **_text_block(str(text))})
-        desc.append({"block_id": cb, "block_type": 32, "table_cell": {},
-                     "children": [tb]})
-        cell_ids.append(cb)
+        for hdr in headers:
+            add_cell(hdr)
+        for ex in examples:
+            m = metrics[ex]
+            pm = (prev or {}).get(ex, {})
+            row = [ex] + [_cellv(m.get(c), pm.get(c)) if c in DELTA_COLS
+                          else _fmt(m.get(c)) for c in cols]
+            for value in row:
+                add_cell(value)
 
-    for hdr in headers:
-        add_cell(hdr)
-    for ex in examples:
-        m = metrics[ex]
-        pm = (prev or {}).get(ex, {})
-        row = [ex] + [_cellv(m.get(c), pm.get(c)) if c in DELTA_COLS
-                      else _fmt(m.get(c)) for c in cols]
-        for c in row:
-            add_cell(c)
+        col_w = [360] + [150] * (len(headers) - 1)
+        tbl = nid()
+        desc.append({"block_id": tbl, "block_type": 31,
+                     "table": {"property": {
+                         "row_size": len(examples) + 1,
+                         "column_size": len(headers),
+                         "column_width": col_w,
+                         "header_row": True}},
+                     "children": cell_ids})
+        top.append(tbl)
 
-    # Widen columns: example name is long, metric cells carry "(±x%)".
-    col_w = [360] + [150] * (len(headers) - 1)
-    tbl = nid()
-    desc.append({"block_id": tbl, "block_type": 31,
-                 "table": {"property": {"row_size": len(examples) + 1,
-                                        "column_size": len(headers),
-                                        "column_width": col_w,
-                                        "header_row": True}},
-                 "children": cell_ids})
-    top.append(tbl)
+    previous_cases = (prev_host or {}).get("cases", {})
+    for name, case in (entry.get("host") or {}).get("cases", {}).items():
+        label = nid()
+        if case.get("status") != "ok":
+            reason = case.get("error") or f"rc={case.get('rc')}"
+            text = f"Host bind · {name} · {case.get('status')}: {reason}"
+            desc.append({"block_id": label, **_text_block(text)})
+            top.append(label)
+            continue
+        text = (f"Host bind · {name} · {case.get('binds')} binds / "
+                f"{case.get('warm_binds')} warm · NPU {case.get('device', '?')}")
+        desc.append({"block_id": label, **_text_block(text)})
+        top.append(label)
+
+        previous = previous_cases.get(name) or {}
+        if previous.get("device") != case.get("device"):
+            previous = {}
+        previous_metrics = previous.get("metrics") or {}
+        host_rows = [["Phase", "Min(us, Δ)", "Median(us)", "Max(us)"]]
+        for phase in ("control_plane", "host_orch", "graph_upload",
+                      "arena_h2d"):
+            metric = (case.get("metrics") or {}).get(phase)
+            if not metric:
+                continue
+            prior = previous_metrics.get(phase) or {}
+            host_rows.append([
+                phase,
+                _cellv(metric.get("min_us"), prior.get("min_us")),
+                _fmt(metric.get("median_us")),
+                _fmt(metric.get("max_us")),
+            ])
+        host_cells = []
+        for row in host_rows:
+            for value in row:
+                tb, cb = nid(), nid()
+                desc.append({"block_id": tb, **_text_block(str(value))})
+                desc.append({"block_id": cb, "block_type": 32,
+                             "table_cell": {}, "children": [tb]})
+                host_cells.append(cb)
+        host_table = nid()
+        desc.append({
+            "block_id": host_table,
+            "block_type": 31,
+            "table": {"property": {
+                "row_size": len(host_rows), "column_size": 4,
+                "column_width": [220, 180, 150, 150], "header_row": True,
+            }},
+            "children": host_cells,
+        })
+        top.append(host_table)
     return top, desc
 
 
@@ -350,6 +429,27 @@ def _load_state(p):
         return json.load(open(p))
     except (OSError, ValueError):
         return {"index_doc": None, "months": {}, "pushed": []}
+
+
+def unpublished_with_metrics(entries, pushed):
+    """Return entries safe to publish and permanently deduplicate.
+
+    A failed benchmark may still emit a partial summary and therefore a
+    non-empty metrics mapping.  Publish only strict successes; the next daily
+    overlap must be allowed to remeasure every partial or failed result.
+    """
+    def complete(e):
+        host = e.get("host")
+        host_ok = host is None or host.get("status") in {
+            "ok", "unsupported", "disabled"
+        }
+        device_measured = bool(e.get("metrics"))
+        device_ok = (e.get("device_status") == "disabled"
+                     or (e.get("rc") == 0 and device_measured))
+        host_measured = host is not None and host.get("status") == "ok"
+        return device_ok and host_ok and (device_measured or host_measured)
+
+    return [e for e in entries if e["sha"] not in pushed and complete(e)]
 
 
 def publish_monthly(token, entries, state_path, domain="hw-native-sys.feishu.cn",
@@ -382,6 +482,8 @@ def publish_monthly(token, entries, state_path, domain="hw-native-sys.feishu.cn"
     for i, e in enumerate(entries):
         e["_prev_metrics"] = None if no_delta else (
             entries[i + 1].get("metrics") if i + 1 < len(entries) else None)
+        e["_prev_host"] = None if no_delta else (
+            entries[i + 1].get("host") if i + 1 < len(entries) else None)
 
     state = _load_state(state_path)
 
@@ -408,9 +510,15 @@ def publish_monthly(token, entries, state_path, domain="hw-native-sys.feishu.cn"
 
     # Only push commits not already published; keep month buckets in the
     # global newest->oldest order so append/prepend land correctly.
-    fresh = [e for e in entries if e["sha"] not in pushed]
+    unpushed = [e for e in entries if e["sha"] not in pushed]
+    fresh = unpublished_with_metrics(entries, pushed)
+    skipped = len(unpushed) - len(fresh)
+    if skipped:
+        print(f"skipping {skipped} unmeasured commit(s); they remain retryable")
     if not fresh:
-        print("nothing new to publish (all commits already pushed).")
+        sync_month_index(token, state["index_doc"], state.get("months", {}),
+                         domain)
+        print("nothing new to publish (all measured commits already pushed).")
         return f"https://{domain}/docx/{state['index_doc']}"
     months = {}
     for e in fresh:
@@ -425,14 +533,8 @@ def publish_monthly(token, entries, state_path, domain="hw-native-sys.feishu.cn"
                 set_doc_link_editable(token, did, "anyone")
             except SystemExit:
                 pass
-            url = f"https://{domain}/docx/{did}"
-            link = {"block_id": "il", "block_type": 2,
-                    "text": {"elements": _elements(f"📅 {month} → {url}")}}
-            # Backfill creates progressively older months -> link at the bottom
-            # of the index; the forward daily run prepends newer ones at top.
-            li = docx_children_count(token, state["index_doc"]) if append else 0
-            docx_append_descendant(token, state["index_doc"], ["il"], [link], li)
-            print(f"created month doc {month}: {url}")
+            print(f"created month doc {month}: "
+                  f"https://{domain}/docx/{did}")
         # rebuild writes into freshly-cleared docs, newest-on-top (like the
         # forward run): prepend.
         push_tables(token, state["months"][month], months[month],
@@ -440,6 +542,7 @@ def publish_monthly(token, entries, state_path, domain="hw-native-sys.feishu.cn"
         state.setdefault("pushed", []).extend(e["sha"] for e in months[month])
         save()  # persist pushed-set incrementally (crash-safe / idempotent)
 
+    sync_month_index(token, state["index_doc"], state.get("months", {}), domain)
     return f"https://{domain}/docx/{state['index_doc']}"
 
 
@@ -492,13 +595,15 @@ def push_tables(token, doc_id, entries, dry_run=False, prepend=False):
         # so per-month grouping does not break the "vs previous commit" delta.
         prev = e["_prev_metrics"] if "_prev_metrics" in e else (
             entries[i + 1].get("metrics") if i + 1 < len(entries) else None)
+        prev_host = e["_prev_host"] if "_prev_host" in e else (
+            entries[i + 1].get("host") if i + 1 < len(entries) else None)
         if e.get("date") != last_date:
             last_date = e.get("date")
             if not dry_run:
                 docx_append_descendant(token, doc_id, ["dh"],
                                        [_date_heading_block(last_date)], idx)
             idx += 1
-        top, desc = _commit_descendants(e, prev, [0])
+        top, desc = _commit_descendants(e, prev, [0], prev_host)
         if dry_run:
             print(f"  [{e.get('date')}] {e['sha'][:10]} -> "
                   f"{len(top)} top, {len(desc)} descendants")

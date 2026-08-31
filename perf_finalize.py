@@ -12,7 +12,7 @@
 #   tmp/perf_history_processed.md      markdown tables, newest commit first
 #
 # Processing:
-#   - back-fill the NPU device per commit (authoritative, from task records)
+#   - keep the NPU device recorded by each worker (with legacy task-log fallback)
 #   - parse the verbatim summary into per-example metrics
 #   - order newest commit first (by commit time)
 #   - compute each metric's change vs the previous (older) commit
@@ -21,8 +21,8 @@
 #     in-window predecessor. We re-read the previous run's out-jsonl and pull in
 #     its newest still-relevant commit purely to anchor that boundary Δ.
 #
-# Device recovery: each shard log records its task id + locked device; the
-# task's recorded command (.sh) holds the exact --commit-list -> sha->device.
+# Legacy device recovery: older shard logs wrapped the full Python worker in a
+# task and omitted the device from some raw rows. New rows record it directly.
 
 import argparse
 import glob
@@ -37,6 +37,24 @@ REPO = Path(".")
 TASKLOG_DIRS = ["/var/lib/taskqueue/logs",
                 str(Path.home() / ".taskqueue" / "logs")]
 METRICS = ["Host", "Device", "Total", "Sched", "Orch"]
+
+
+def entry_complete(entry):
+    """Whether every selected benchmark completed with usable measurements."""
+    host = entry.get("host")
+    host_ok = host is None or host.get("status") in {
+        "ok", "unsupported", "disabled"
+    }
+    device_measured = bool((entry.get("summary") or "").strip())
+    device_ok = (entry.get("device_status") == "disabled"
+                 or (entry.get("rc") == 0 and device_measured))
+    host_measured = host is not None and host.get("status") == "ok"
+    return device_ok and host_ok and (device_measured or host_measured)
+
+
+def has_measurement(entry):
+    return bool(entry.get("metrics")) or (
+        (entry.get("host") or {}).get("status") == "ok")
 
 
 def task_cmd_text(task_id):
@@ -140,7 +158,7 @@ def carry_baseline(prev_jsonl, window_shas):
             e = json.loads(line)
         except ValueError:
             continue
-        if e.get("sha") in window_shas or not e.get("metrics"):
+        if e.get("sha") in window_shas or not has_measurement(e):
             continue
         prev.append(e)
     if not prev:
@@ -170,7 +188,7 @@ def published_metrics(prev_jsonl):
             e = json.loads(line)
         except ValueError:
             continue
-        if e.get("sha") and e.get("metrics"):
+        if e.get("sha") and has_measurement(e):
             pub[e["sha"]] = e
     return pub
 
@@ -221,7 +239,42 @@ def alert_line(al):
     return f"⚠️ 重点回归: {top}" + (" …" if len(al) > 5 else "")
 
 
-def commit_table_md(entry, prev_metrics):
+def host_tables_md(host, prev_host):
+    """Markdown tables for the two HBG cases, using warm-bind minima for Δ."""
+    out = []
+    previous_cases = (prev_host or {}).get("cases", {})
+    for name, case in (host or {}).get("cases", {}).items():
+        out += [f"#### Host bind · {name}", ""]
+        if case.get("status") != "ok":
+            reason = case.get("error") or f"rc={case.get('rc')}"
+            out += [f"_{case.get('status', 'not_run')}: {reason}_", ""]
+            continue
+        previous = previous_cases.get(name) or {}
+        if previous.get("device") != case.get("device"):
+            previous = {}
+        previous_metrics = previous.get("metrics") or {}
+        out += [
+            f"{case.get('binds')} binds · {case.get('warm_binds')} warm · "
+            f"NPU {case.get('device', '?')}",
+            "",
+            "| Phase | Min (us, vs previous) | Median (us) | Max (us) |",
+            "|:--|--:|--:|--:|",
+        ]
+        metrics = case.get("metrics") or {}
+        for phase in ("control_plane", "host_orch", "graph_upload",
+                      "arena_h2d"):
+            metric = metrics.get(phase)
+            if not metric:
+                continue
+            prev = previous_metrics.get(phase) or {}
+            out.append(
+                f"| {phase} | {_cellv(metric.get('min_us'), prev.get('min_us'))} | "
+                f"{_fmt(metric.get('median_us'))} | {_fmt(metric.get('max_us'))} |")
+        out.append("")
+    return out
+
+
+def commit_table_md(entry, prev_metrics, prev_host=None):
     """Markdown table for one commit: metrics + Δ vs previous commit."""
     sha, dev, date = entry["sha"][:10], entry.get("device"), entry.get("date", "")
     meta = " · ".join(filter(None, [f"`{sha}`", date,
@@ -233,19 +286,25 @@ def commit_table_md(entry, prev_metrics):
     if alerts:
         head += [f"> {alert_line(alerts)}", ""]
     if not metrics:
-        return "\n".join(head + [f"_no parseable summary (rc={entry.get('rc')})_",
-                                 "", "```text", entry.get("summary") or "", "```", ""])
-    cols = entry.get("present") or METRICS
-    header = ["Example"] + [f"{c} (us)" for c in cols]
-    rows = ["| " + " | ".join(header) + " |",
-            "|" + ":--|" + "--:|" * (len(header) - 1)]
-    for ex in sorted(metrics):
-        m = metrics[ex]
-        pm = (prev_metrics or {}).get(ex, {})
-        cells = [ex] + [_cellv(m.get(c), pm.get(c)) if c in DELTA_COLS
-                        else _fmt(m.get(c)) for c in cols]
-        rows.append("| " + " | ".join(cells) + " |")
-    return "\n".join(head + rows + [""])
+        if entry.get("device_status") == "disabled":
+            rows = ["_Device benchmark disabled; host-only run._", ""]
+        else:
+            rows = [f"_no parseable summary (rc={entry.get('rc')})_", "",
+                    "```text", entry.get("summary") or "", "```", ""]
+    else:
+        cols = entry.get("present") or METRICS
+        header = ["Example"] + [f"{c} (us)" for c in cols]
+        rows = ["| " + " | ".join(header) + " |",
+                "|" + ":--|" + "--:|" * (len(header) - 1)]
+        for ex in sorted(metrics):
+            m = metrics[ex]
+            pm = (prev_metrics or {}).get(ex, {})
+            cells = [ex] + [_cellv(m.get(c), pm.get(c)) if c in DELTA_COLS
+                            else _fmt(m.get(c)) for c in cols]
+            rows.append("| " + " | ".join(cells) + " |")
+        rows.append("")
+    rows.extend(host_tables_md(entry.get("host"), prev_host))
+    return "\n".join(head + rows)
 
 
 def main():
@@ -257,19 +316,23 @@ def main():
     ap.add_argument("--out-md", required=True)
     ap.add_argument("--shard-glob", required=True,
                     help="glob for shard logs, e.g. <workdir>/perf_shard_*.log")
+    ap.add_argument("--no-freeze-existing", action="store_true",
+                    help="do not treat a prior output file as already published")
+    ap.add_argument("--no-carry-baseline", action="store_true",
+                    help="do not carry a baseline from a prior output file")
     args = ap.parse_args()
 
     global REPO
     REPO = Path(args.repo).resolve()
     dev_map = sha_to_device(args.shard_glob)
-    published = published_metrics(args.out_jsonl)
+    published = {} if args.no_freeze_existing else published_metrics(args.out_jsonl)
     # The raw jsonl may hold several lines for one sha: a card that wedged
     # mid-run writes an rc=1 line, then the commit is re-benchmarked on a fresh
     # card (see perf_history_parallel.sh's card-switch retry) and writes an
     # rc=0 line. Collapse to one entry per sha, preferring a successful
     # measurement over a failure, else the latest line.
     def _good(e):
-        return e.get("rc") == 0 and bool((e.get("summary") or "").strip())
+        return entry_complete(e)
     by_sha = {}
     for l in open(args.jsonl):
         if not l.strip():
@@ -289,6 +352,8 @@ def main():
             # doc stays identical to the baseline used for newer commits' Δ.
             e["metrics"] = frozen.get("metrics") or {}
             e["present"] = frozen.get("present") or []
+            if frozen.get("host"):
+                e["host"] = frozen["host"]
             if frozen.get("device"):
                 e["device"] = frozen["device"]
         else:
@@ -300,7 +365,8 @@ def main():
 
     # Anchor the window's oldest commit to the newest commit from the previous
     # run's output, so the first commit of each daily window still gets a Δ.
-    carry = carry_baseline(args.out_jsonl, {e["sha"] for e in entries})
+    carry = None if args.no_carry_baseline else carry_baseline(
+        args.out_jsonl, {e["sha"] for e in entries})
     if carry is not None:
         entries.append(carry)
     entries.sort(key=entry_time, reverse=True)
@@ -312,12 +378,14 @@ def main():
     devs = sorted({e.get("device") for e in entries if e.get("device")})
     dates = [e["date"] for e in entries if e.get("date")]
     span = f"{dates[-1]} → {dates[0]}" if dates else "?"
-    ok = sum(1 for e in entries if e.get("metrics"))
+    ok = sum(1 for e in entries if has_measurement(e))
 
     # Top-level watchlist of commits with a large regression.
     flagged = []
     for i, e in enumerate(entries):
-        prev = entries[i + 1]["metrics"] if i + 1 < len(entries) else None
+        prev_entry = entries[i + 1] if i + 1 < len(entries) else None
+        prev = (prev_entry["metrics"] if prev_entry is not None
+                and e.get("device") == prev_entry.get("device") else None)
         al = commit_alerts(e.get("metrics"), prev)
         if al:
             flagged.append((e, al))
@@ -331,6 +399,8 @@ def main():
         "> Δ = 相对上一个(更老)commit 的变化 · "
         f"🔺 变慢 ≥{DELTA_FLAG_PCT:.0f}% · 🔻 变快 ≥{DELTA_FLAG_PCT:.0f}% · "
         f"⚠️ = 设备侧指标回归 ≥{ALERT_PCT:.0f}%",
+        "> Host bind 使用每个 warm bind 内 control-plane 求和后的最小值；"
+        "首 bind/rank 已丢弃，跨 NPU 不计算 Δ。",
         "",
     ]
     if flagged:
@@ -345,11 +415,14 @@ def main():
         out += ["---", ""]
     last_date = None
     for i, e in enumerate(entries):
-        prev = entries[i + 1]["metrics"] if i + 1 < len(entries) else None
+        prev_entry = entries[i + 1] if i + 1 < len(entries) else None
+        prev = (prev_entry["metrics"] if prev_entry is not None
+                and e.get("device") == prev_entry.get("device") else None)
+        prev_host = (prev_entry.get("host") if prev_entry is not None else None)
         if e.get("date") != last_date:
             last_date = e.get("date")
             out.append(f"## 📅 {last_date or '未知日期'}\n")
-        out.append(commit_table_md(e, prev))
+        out.append(commit_table_md(e, prev, prev_host))
     Path(args.out_md).write_text("\n".join(out))
     print(f"processed {len(entries)} commits (NPU {devs})")
     print(f"  raw kept:   {args.jsonl}  (untouched)")

@@ -3,14 +3,18 @@
 > 面向 [hw-native-sys/simpler](https://github.com/hw-native-sys/simpler) 的 PR 级 NPU 性能追踪工具。
 
 工具会逐个检出 `main` 上的 squash commit，在一张或多张 NPU 上重新构建并执行
-benchmark，计算相邻 PR 的性能变化，最终生成 Markdown/JSONL 报告，也可以增量发布到飞书。
+benchmark，并额外测量 `host_build_graph` 的 Qwen3-14B 与 DeepSeek-V4 FLASH
+bind control plane，计算相邻 PR 的性能变化，最终生成 Markdown/JSONL 报告，也可以
+增量发布到飞书。
 
-> 适合用来回答：最近哪个 PR 让 Device 或 Orchestration 耗时发生了变化？
+> 适合用来回答：最近哪个 PR 让 Device、Orchestration 或 HBG host bind 耗时发生了变化？
 
 当前主要支持：
 
 - 按最近 PR 数量或时间窗口选择 commit，并用独立 worktree 隔离构建；
 - 在多张 NPU 上并行测试，遇到异常设备时自动换卡重试；
+- 每个 commit 以 6 轮分别测量 Qwen3-14B（一卡）和 DeepSeek-V4 FLASH（两卡）的
+  HBG host bind phases；
 - 汇总性能变化、生成本地报告，并按 commit SHA 去重发布飞书月报。
 
 安装后的统一入口是 `pto-simpler-perf-tracker`；不安装时也可直接运行仓库中的
@@ -22,7 +26,9 @@ benchmark，计算相邻 PR 的性能变化，最终生成 Markdown/JSONL 报告
 simpler/main commits
         │
         ▼
-按 PR 创建独立 worktree ──► 重新构建 ──► NPU benchmark
+按 PR 创建独立 worktree ──► 重新构建 ──┬─► Device benchmark
+                                        ├─► Qwen HBG host bind
+                                        └─► DeepSeek HBG host bind
                                             │
                                             ▼
                                   原始 Markdown / JSONL
@@ -48,12 +54,16 @@ simpler/main commits
 
 2. **隔离构建和测试**
    每个 commit 都使用独立的 Git worktree，避免不同版本的源码、构建目录和 Python
-   环境互相污染。工具会在该 worktree 中重新构建 simpler，然后执行项目自带的
-   `benchmark_rounds.sh`。
+   环境互相污染。工具先在普通用户进程中重新构建 simpler；构建完成后才通过
+   `task-submit` 执行项目自带的 `benchmark_rounds.sh`，随后按
+   `.claude/skills/hbg-bind-phases` 的 numbers 口径分别执行 Qwen 和 DeepSeek case；
+   编译期间不占用 NPU。构建和已分配设备的测试都会由工具显式加载 CANN 环境，
+   不依赖 cron 或交互 shell 的 `LD_LIBRARY_PATH`。
 
 3. **按 NPU 并行分片**
-   多卡运行时，commit 列表会被拆成多个 shard，每个 shard 通过 `task-submit`
-   绑定一张 NPU。某张卡异常时，未完成的 commit 会换卡重试，不会要求整批任务重跑。
+   多卡运行时，commit 列表会按连续区间拆成多个 shard；每个 benchmark 就绪后通过
+   `task-submit --device auto` 自动申请空闲 NPU，结束立即释放。失败 commit 会重试，
+   不要求整批任务重跑；跨卡边界不计算性能 Δ，避免把卡间差异误报成回归。
 
 4. **原始数据与报告分离**
    benchmark 结果先按完成顺序追加到原始 JSONL/Markdown，确保中断时已完成的数据仍然
@@ -120,7 +130,7 @@ runtime/{config,state,logs,tmp}
 git clone https://github.com/pypto-tools/pto-simpler-perf-tracker.git
 cd pto-simpler-perf-tracker
 
-# 最小验证：最近 1 个 PR，1 张 NPU，每个 case 运行 10 轮
+# 最小验证：最近 1 个 PR，Device case 10 轮，两个 host case 各 6 轮
 ./run.sh --recent 1 -m 1 -r 10
 ```
 
@@ -149,6 +159,10 @@ cd pto-simpler-perf-tracker
 | `--recent N` | 测试最近 N 个 commit；与 `--since` 二选一 | — |
 | `-m M` | 并行 shard / NPU 数量 | `1` |
 | `-r ROUNDS` | 每个 benchmark case 的轮数 | `100` |
+| `--host-rounds N` | 每个 HBG host case 的轮数；每个 rank 的首 bind 会丢弃 | `6` |
+| `--host-case CASE` | 只测指定 host case，可重复；`qwen3-14b` / `dsv4-flash` | 两者 |
+| `--host-only` | 快速验证时跳过原 Device benchmark，只采 host | 关闭 |
+| `--no-host` | 关闭额外的 HBG host 测量 | 关闭 |
 | `--workdir DIR` | clone、worktree 和报告目录 | `<state>/work` |
 | `--push` | 将处理后的结果增量发布到飞书 | 关闭 |
 
@@ -164,10 +178,17 @@ cd pto-simpler-perf-tracker
 | `perf_history.md` / `.jsonl` | 原始结果，逐 commit 追加写入 |
 | `perf_history_processed.md` / `.jsonl` | 去重、排序并计算 Δ 后的最终报告 |
 | `perf_shard_*.log` | 各 NPU shard 的执行日志 |
+| `perf_logs/<sha>/.../host_bind_*_raw.txt` | 带 `[stamp]` 的 HBG bind phase 原始日志 |
 | `simpler/` | 工具管理的 simpler clone 和 benchmark worktree |
 
 原始文件只追加、不改写；后处理始终输出到 `*_processed.*`。并行写入使用 `flock`
 串行化，任务中断后可以保留已完成 commit 的结果。
+
+Host 报告对每个 case 展示 `control_plane`、`host_orch`、`graph_upload` 和
+`arena_h2d` 的 min/median/max。统计会按 rank 丢掉首个 cold bind；control-plane
+先在每个 warm bind 内求和，再跨 bind 取最小值，不会把不同 bind 的 phase minima
+相加。相邻 commit 的 host Δ 只在 allocation 设备一致时展示；共享主机噪声较大，
+该趋势用于筛查，精确 A/B 仍应按 Simpler 技能要求交错测量。
 
 ## 飞书发布（可选）
 
@@ -198,15 +219,81 @@ FEISHU_WIKI_TOKEN=xxxxxxxx
 如需在失败时发送飞书私信，可额外配置 `.env.example` 中的
 `NOTIFY_RECEIVE_ID` 和 `NOTIFY_RECEIVE_TYPE`。
 
+## GitHub CI 每周性能
+
+`ci_weekly_report.py` 是独立于 NPU benchmark 的周报模块。它通过 GitHub REST API
+读取 `hw-native-sys/simpler` 的 PR CI，分别统计四个目标 job 在 OS、执行路径和匿名
+runner 性能档位上的 p50/p90，并维护以下飞书文档层级：
+
+```text
+Simpler 总索引
+└── GitHub CI 性能索引
+    ├── 2026-W35
+    ├── 2026-W34
+    └── ...
+```
+
+每周文档保存 job wall time、阶段时间、成功样本数和最慢 run 链接。GitHub issue
+`#1772` 只维护一条带隐藏标记的评论，每次覆盖本周摘要；完整历史保留在飞书。
+工具只重建自己创建的 CI 索引和周文档，对人工维护的 Simpler 总索引只幂等追加一条
+CI 索引链接。
+
+配置文件中需要：
+
+```dotenv
+FEISHU_APP_ID=cli_xxx
+FEISHU_APP_SECRET=xxx
+FEISHU_SIMPLER_INDEX_WIKI_TOKEN=xxx
+CI_RUNNER_TIERS_JSON='{"1001":"standard","1002":"slow"}'
+CI_RUNNER_ANON_SALT=本机随机值
+```
+
+GitHub 认证默认复用服务器已有的 `gh auth` 登录，不需要在 tracker 配置中再保存一份
+token；`GITHUB_TOKEN`/`GH_TOKEN` 只作为可选覆盖。现有登录需要具备目标仓库的
+Actions 读取和 issue 写入权限。飞书继续复用 tracker 已有的 `FEISHU_APP_ID` 和
+`FEISHU_APP_SECRET`。`FEISHU_SIMPLER_INDEX_*` 只标识人工维护的 Simpler 总索引，
+刻意不复用其他报告的 `FEISHU_WIKI_TOKEN`/`FEISHU_DOCX_TOKEN`，避免把 CI 入口写进
+错误文档；它不是新的认证凭据。runner 映射的 key 可以是 GitHub API 返回的 runner
+id 或 name，value 是对外展示的匿名档位；
+未配置的 runner 会分别显示为稳定的 `unclassified-xxxxxxxx`，不会泄露或合并真实名称。
+
+先生成本地报告验证口径，不访问飞书、也不修改 issue：
+
+```bash
+./ci_weekly.sh --week 2026-W35
+```
+
+确认后发布。统计周期固定为北京时间周一 00:00（含）到下一周周一 00:00（不含），
+即完整覆盖周一至周日；省略 `--week` 时使用网络时间选择上一个完整自然周：
+
+```bash
+./ci_weekly.sh --publish
+```
+
+本地脱敏快照保存在 `<state>/ci-weekly/YYYY-Www.{json,md}`，发布状态保存在
+`<state>/ci-weekly-state.json`。重复执行同一周不会创建重复飞书文档或 issue 评论；确需
+按新数据重建某周文档时使用 `--week YYYY-Www --publish --force`。
+
+选周和报告生成时间始终来自 HTTP `Date` 网络时间，包括显式传入 `--week` 的情况；
+网络时间不可用时直接退出，不回退到服务器时钟，也不会写飞书或 issue。
+
+本机时钟不可信时，可让现有网络时间调度器每天检查一次。周报模块自身按 week
+幂等，因此只有新一周会产生新文档：
+
+```cron
+*/30 * * * * python /home/pypto-tools/pto-simpler-perf-tracker/app/scheduled_run.py --lock /home/pypto-tools/pto-simpler-perf-tracker/state/ci-weekly.lock --stamp /home/pypto-tools/pto-simpler-perf-tracker/state/ci-weekly-daily.stamp -- /home/pypto-tools/pto-simpler-perf-tracker/app/ci_weekly.sh --publish >> /home/pypto-tools/pto-simpler-perf-tracker/logs/ci-weekly.log 2>&1
+```
+
 ## NPU 故障恢复
 
-共享 NPU 可能在测试过程中因 kernel 超时进入异常状态。并行调度器会识别某个 shard
-未完成尾部任务的情况，临时弃用该卡，并把尚未完成的 commit 提交到另一张卡：
+共享 NPU 可能在测试过程中因 kernel 超时进入异常状态。每个 commit 构建完成后才会
+通过 `task-submit` 申请设备，benchmark 结束即释放；失败 commit 在下一轮换卡重试：
 
 - 优先选择 `task-submit --list` 中空闲的卡；
 - 同一 commit 在多张卡上失败后，才判定为 commit 自身失败；
-- 异常卡列表仅在本次运行中有效，不会形成永久黑名单；
 - 重试产生的多条记录由后处理合并，并优先保留成功结果。
+- 固定范围回填保留此前严格成功的数据，中断后不会从零开始；
+- 客户端等待时间长于 benchmark 硬超时，后台任务未结束时不会删除 worktree。
 
 可通过环境变量调整恢复策略：
 
@@ -214,30 +301,59 @@ FEISHU_WIKI_TOKEN=xxxxxxxx
 | --- | --- | --- |
 | `PERF_MAX_ROUNDS` | 最多重新调度轮数 | `4` |
 | `PERF_MAX_ATTEMPT` | 单个 commit 最多尝试的不同设备数 | `3` |
-| `PERF_DEVICES` | 限定设备池，例如 `3,4,5,6` | 全部可用设备 |
-| `PERF_TASK_TIMEOUT` | 单个 shard 的排队等待时间 | `6h` |
+| `PERF_TASK_TIMEOUT` | 兼容旧配置：单个 benchmark 的硬超时 | `3600s` |
+| `PERF_TASK_MAXTIME` | 单个 benchmark 的硬超时（优先于上项） | `3600s` |
+| `PERF_TASK_WAIT_TIMEOUT` | `task-submit` 客户端等待上限 | `24h` |
+
+### CANN 运行环境
+
+工具启动时会定位 CANN 的 `set_env.sh`，并在每个已经取得设备 allocation 的
+`task-submit` benchmark 内再次显式加载。随后在同一个 allocation 中运行 simpler
+自带的 `onboard-arch-precheck`，确认实际芯片与 `--platform` 匹配。默认依次检查：
+
+1. `ASCEND_HOME_PATH`、`ASCEND_TOOLKIT_HOME`、`CANN_HOME` 指向目录中的
+   `set_env.sh`；
+2. `/usr/local/Ascend/cann/set_env.sh`；
+3. `/usr/local/Ascend/ascend-toolkit/{set_env.sh,latest/set_env.sh}`。
+
+安装路径非标准时，在 `perf-tracker.env` 中配置绝对路径：
+
+```dotenv
+PERF_CANN_ENV_SCRIPT=/path/to/cann/set_env.sh
+```
+
+显式路径不存在时任务会在创建 worktree 前直接失败。benchmark 启动后还会在已分配
+设备的 job 内先导入一次 `torch_npu`；这样动态库缺失会作为单一的 CANN preflight
+错误立即暴露，不再逐个 case 重复失败。
 
 ## 定时运行
 
-下面的 cronie 配置每天北京时间 22:00 执行增量测试并发布到飞书：
+服务器本机时钟不可信时，不要只靠 `CRON_TZ` 判断执行窗口。安装包中的
+`scheduled_run.py` 会读取 HTTP `Date` 响应头，显式换算为北京时间，并且只在
+12:30–13:30 或 22:00–次日 08:00 启动任务。网络时间不可用时会直接跳过，绝不
+回退到服务器时间执行 benchmark。
+
+cron 可以每 30 分钟轻量唤醒一次调度器；窗口外只做网络时间校验，不占用 NPU，
+同一北京时间逻辑日成功后不会重复运行：
 
 ```cron
-CRON_TZ=Asia/Shanghai
-0 22 * * * source /path/to/conda.sh && conda activate YOUR_ENV && /usr/local/bin/pto-simpler-perf-tracker --push >> /home/pypto-tools/pto-simpler-perf-tracker/logs/cron.log 2>&1
+*/30 * * * * source /path/to/conda.sh && conda activate YOUR_ENV && python /home/pypto-tools/pto-simpler-perf-tracker/app/scheduled_run.py --lock /home/pypto-tools/pto-simpler-perf-tracker/state/run.lock --stamp /home/pypto-tools/pto-simpler-perf-tracker/state/daily.stamp -- /usr/local/bin/pto-simpler-perf-tracker --push >> /home/pypto-tools/pto-simpler-perf-tracker/logs/cron.log 2>&1
 ```
 
-`CRON_TZ` 只负责时区，机器系统时钟仍应由 NTP 保持准确。报告中的时间戳会优先读取
-HTTP `Date` 响应头；网络不可用时才回退到本机时间并输出 `LOCAL-FALLBACK` 提示。
+调度锁会阻止日常任务、回填任务重叠。报告时间戳仍会优先读取 HTTP `Date` 响应头；
+网络不可用时报告生成可回退本机时间并输出 `LOCAL-FALLBACK`，但调度器本身不会回退。
 
 ## 主要文件
 
 | 文件 | 用途 |
 | --- | --- |
 | `run.sh` | 总入口：更新仓库、运行 benchmark、处理结果、可选发布 |
-| `perf_history_parallel.sh` | 用 `task-submit` 将 commit 分片到多张 NPU，并负责换卡重试 |
-| `perf_history.py` | 为每个 commit 创建 worktree、构建并执行 benchmark |
+| `ci_weekly.sh` | 加载私有配置并运行独立的 GitHub CI 周报模块 |
+| `perf_history_parallel.sh` | 将 commit 连续分片到多张 NPU，并负责续跑和换卡重试 |
+| `perf_history.py` | 为每个 commit 创建 worktree、构建，并采集 Device 与两个 HBG host case |
 | `perf_finalize.py` | 结果去重、设备标记、排序和相邻 commit Δ 计算 |
 | `feishu_perf_report.py` | 将处理后的结果发布到飞书文档或 Wiki |
+| `ci_weekly_report.py` | 采集 GitHub CI 时间并维护飞书周报、索引与 issue 看板 |
 | `notify_feishu.py` | 发送运行失败通知 |
 | `nettime.py` | 获取不依赖本机系统时钟的报告时间 |
 | `backfill.sh` | 历史数据回填辅助脚本 |

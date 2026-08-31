@@ -53,12 +53,6 @@ REF="upstream/main"
 UNTIL_SHA=""     # newest commit to include (upper bound); skip anything newer.
                  # Use it to fence off commits already in the doc. Empty = REF.
 M=4
-# Pin to a hand-picked set of free logical device ids (space/comma separated).
-# task-submit's auto allocation only sees its own flocks, so it cannot avoid
-# cards busy with non-task-submit processes — explicit pinning sidesteps that.
-# When set, the shard count follows this list (overrides -m). Override with
-# --devices "..." or PERF_DEVICES; set to "" to fall back to --device auto.
-DEVICES="${PERF_DEVICES:-3 4 5 6 8 9 10 11}"
 ROUNDS=100
 BATCH=32
 LIMIT=0          # 0 = no cap (churn every undone commit); else stop after N new
@@ -69,7 +63,7 @@ REBUILD=0        # overwrite the doc from scratch (clear + rewrite, ordered)
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -m) M="$2"; shift 2 ;;
-    --devices) DEVICES="$2"; shift 2 ;;
+    --devices) echo "WARN: --devices is ignored; use -m with task-submit auto" >&2; shift 2 ;;
     -r) ROUNDS="$2"; shift 2 ;;
     -b|--batch) BATCH="$2"; shift 2 ;;
     --limit) LIMIT="$2"; shift 2 ;;
@@ -194,7 +188,6 @@ while :; do
   # 2. Benchmark this batch (writes <BF>/perf_history.{md,jsonl} fresh).
   bash "$SCRIPT_DIR/perf_history_parallel.sh" \
     --repo "$REPO" --workdir "$BF" -m "$M" -r "$ROUNDS" --ref "$REF" \
-    ${DEVICES:+--devices "$DEVICES"} \
     --commit-list "${CHUNK[*]}"
 
   # 3. Append the batch to the cumulative archive (durable record).

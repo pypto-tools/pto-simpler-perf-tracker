@@ -19,6 +19,10 @@
 #   --recent N     benchmark most-recent N PRs instead of --since
 #   -m M           parallel shards / NPUs (default 4)
 #   -r ROUNDS      benchmark rounds per case (default 100)
+#   --host-rounds N HBG host rounds per case (default 6)
+#   --host-case C   only measure this host case; repeat for both
+#   --host-only     skip the Device benchmark (quick validation)
+#   --no-host       disable HBG host measurements
 #   --workdir DIR  outputs/worktrees/clone dir (default <script>/work)
 #   --push         push processed md to Feishu (loads config/perf-tracker.env)
 
@@ -68,6 +72,10 @@ SINCE="36 hours ago"
 RECENT=""
 M=1
 ROUNDS=100
+HOST_ROUNDS=6
+HOST_CASE_ARGS=()
+NO_HOST=0
+HOST_ONLY=0
 WORKDIR="$STATE_DIR/work"
 PUSH=0
 while [[ $# -gt 0 ]]; do
@@ -76,6 +84,10 @@ while [[ $# -gt 0 ]]; do
     --recent) RECENT="$2"; SINCE=""; shift 2 ;;
     -m) M="$2"; shift 2 ;;
     -r) ROUNDS="$2"; shift 2 ;;
+    --host-rounds) HOST_ROUNDS="$2"; shift 2 ;;
+    --host-case) HOST_CASE_ARGS+=(--host-case "$2"); shift 2 ;;
+    --host-only) HOST_ONLY=1; shift ;;
+    --no-host) NO_HOST=1; shift ;;
     --workdir) WORKDIR="$2"; shift 2 ;;
     --push) PUSH=1; shift ;;
     *) echo "unknown arg: $1"; exit 1 ;;
@@ -163,10 +175,14 @@ fi
 
 # 2. Parallel benchmark (writes <workdir>/perf_history.{md,jsonl}).
 ARGS=(--repo "$REPO" --workdir "$WORKDIR" -m "$M" -r "$ROUNDS" --ref upstream/main)
+ARGS+=(--host-rounds "$HOST_ROUNDS" "${HOST_CASE_ARGS[@]}")
+if [[ "$NO_HOST" -eq 1 ]]; then ARGS+=(--no-host); fi
+if [[ "$HOST_ONLY" -eq 1 ]]; then ARGS+=(--host-only); fi
 if [[ -n "$RECENT" ]]; then ARGS+=(-n "$RECENT"); else ARGS+=(--since "$SINCE"); fi
 echo "[run] benchmarking: ${ARGS[*]}"
 STAGE="benchmark shards"
-bash "$SCRIPT_DIR/perf_history_parallel.sh" "${ARGS[@]}"
+BENCH_RC=0
+bash "$SCRIPT_DIR/perf_history_parallel.sh" "${ARGS[@]}" || BENCH_RC=$?
 
 # 3. Post-process into separate files (raw kept intact).
 STAGE="finalize"
@@ -178,6 +194,11 @@ if [[ -s "$WORKDIR/perf_history.jsonl" ]]; then
     --shard-glob "$WORKDIR/perf_shard_*.log"
 else
   echo "[run] no results to process."
+  if [[ "$BENCH_RC" -ne 0 ]]; then
+    STAGE="benchmark validation"
+    echo "[run] FAILED: benchmark batch produced no strict successes (rc=$BENCH_RC)" >&2
+    exit "$BENCH_RC"
+  fi
   exit 0
 fi
 
@@ -198,6 +219,12 @@ if [[ "$PUSH" -eq 1 ]]; then
     --from-processed "$WORKDIR/perf_history_processed.jsonl" \
     --publish --no-delta --title-prefix "Simpler 性能实测值" \
     --state "$WORKDIR/feishu_state_raw.json"
+fi
+
+if [[ "$BENCH_RC" -ne 0 ]]; then
+  STAGE="benchmark validation"
+  echo "[run] FAILED: benchmark batch produced no strict successes (rc=$BENCH_RC)" >&2
+  exit "$BENCH_RC"
 fi
 
 echo "[run] done. processed md: $WORKDIR/perf_history_processed.md"

@@ -22,6 +22,12 @@ done
 [[ -L "$BIN_DIR/pto-simpler-perf-tracker" ]]
 [[ "$(readlink "$BIN_DIR/pto-simpler-perf-tracker")" == "$TOOL_ROOT/app/run.sh" ]]
 [[ -x "$BIN_DIR/pto-simpler-perf-tracker" ]]
+[[ -x "$TOOL_ROOT/app/scheduled_run.py" ]]
+[[ -x "$TOOL_ROOT/app/catchup_once.sh" ]]
+[[ -x "$TOOL_ROOT/app/ci_weekly_report.py" ]]
+[[ -x "$TOOL_ROOT/app/ci_weekly.sh" ]]
+bash -n "$TOOL_ROOT/app/ci_weekly.sh"
+"$TOOL_ROOT/app/ci_weekly.sh" --help >/dev/null
 bash -n "$BIN_DIR/pto-simpler-perf-tracker"
 [[ "$(find "$BIN_DIR" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ]]
 

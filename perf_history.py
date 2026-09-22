@@ -60,6 +60,9 @@ HOST_CASES = {
 }
 HOST_BIND_PHASE_RE = re.compile(
     r"bind phase=(\w+) start_ns=(\d+) dur_ns=(\d+)")
+HOST_STRACE_FIELD_RE = re.compile(r"\b(pid|inv|name|dur)=([^\s]+)")
+HOST_STRACE_BIND_PREFIX = "chip.run.bind."
+HOST_STRACE_BIND_ROOT = "chip.run.bind"
 HOST_STAMP_RE = re.compile(r"^\[stamp\] (.*)$", re.MULTILINE)
 HOST_BIND_CLOSING_PHASE = "arena_h2d"
 HOST_CONTROL_PLANE = (
@@ -217,12 +220,8 @@ def build_bench_cmd(root, rounds, runtime, platform, verbose=False):
     return cmd
 
 
-def parse_host_bind_metrics(text, rounds, ranks):
-    """Parse warm HBG bind-phase statistics in microseconds.
-
-    The control-plane total is summed inside each bind before statistics are
-    calculated. The first bind of every rank is excluded as cold warm-up.
-    """
+def _parse_legacy_host_binds(text, ranks):
+    """Return complete legacy bind groups and their warm subset."""
     binds = []
     current = {}
     for match in HOST_BIND_PHASE_RE.finditer(text or ""):
@@ -234,12 +233,69 @@ def parse_host_bind_metrics(text, rounds, ranks):
             current = {}
     if current and "host_orch" in current:
         binds.append(current)
+    warm = binds[min(ranks, len(binds)):]
+    return binds, warm
+
+
+def _parse_strace_host_binds(text):
+    """Return complete STRACE bind groups and drop one cold bind per PID."""
+    groups = {}
+    complete = set()
+    for line in (text or "").splitlines():
+        if "[STRACE]" not in line:
+            continue
+        fields = dict(HOST_STRACE_FIELD_RE.findall(line.split("[STRACE]", 1)[1]))
+        name = fields.get("name", "")
+        if name != HOST_STRACE_BIND_ROOT and not name.startswith(
+                HOST_STRACE_BIND_PREFIX):
+            continue
+        try:
+            key = (int(fields["pid"]), int(fields["inv"]))
+        except (KeyError, ValueError):
+            continue
+        if name == HOST_STRACE_BIND_ROOT:
+            complete.add(key)
+            continue
+        try:
+            dur_us = int(fields["dur"]) / 1000.0
+        except (KeyError, ValueError):
+            continue
+        phase = name[len(HOST_STRACE_BIND_PREFIX):]
+        groups.setdefault(key, {})[phase] = dur_us
+
+    keyed_binds = [
+        (key, bind) for key, bind in groups.items()
+        if key in complete and "host_orch" in bind
+    ]
+    cold_keys = {}
+    for key, _bind in keyed_binds:
+        cold_keys.setdefault(key[0], key)
+    warm = [bind for key, bind in keyed_binds
+            if key != cold_keys[key[0]]]
+    return [bind for _key, bind in keyed_binds], warm, len(cold_keys)
+
+
+def parse_host_bind_metrics(text, rounds, ranks):
+    """Parse warm HBG bind-phase statistics in microseconds.
+
+    Both the legacy ``bind phase=`` records and the current
+    ``[STRACE] name=chip.run.bind.*`` records are accepted. STRACE records are
+    grouped by process and invocation so interleaved multi-rank output cannot
+    mix phases from different binds.
+    """
+    binds, warm, strace_pids = _parse_strace_host_binds(text)
+    if binds:
+        if ranks and strace_pids != ranks:
+            raise ValueError(
+                f"found {strace_pids} STRACE bind process(es), expected {ranks}")
+    else:
+        binds, warm = _parse_legacy_host_binds(text, ranks)
     if not binds:
-        raise ValueError("no complete `bind phase=` groups found")
+        raise ValueError(
+            "no complete `bind phase=` or `[STRACE] chip.run.bind` groups found")
     if rounds and len(binds) != rounds * ranks:
         raise ValueError(
             f"found {len(binds)} binds, expected exactly {rounds * ranks}")
-    warm = binds[min(ranks, len(binds)):]
     if not warm:
         raise ValueError("all binds are cold; host benchmark needs at least two rounds")
 

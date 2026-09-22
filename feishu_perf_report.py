@@ -133,10 +133,11 @@ def _heading_block(level, text):
 
 
 def _code_block(text):
-    # language 1 = PlainText; wrap so wide tables don't overflow.
+    # language 1 = PlainText.  Keep wide reports on one line so Feishu can
+    # scroll them horizontally instead of squeezing the document content.
     return {"block_type": 14,
             "code": {"elements": _elements(text),
-                     "style": {"language": 1, "wrap": True}}}
+                     "style": {"language": 1, "wrap": False}}}
 
 
 def _text_block(text):
@@ -222,7 +223,13 @@ def clear_doc(token, doc_id):
             return
         k = min(n, 50)
         _api("DELETE", url, token=token,
-             body={"start_index": n - k, "end_index": n})
+            body={"start_index": n - k, "end_index": n})
+
+
+def delete_file(token, file_token, file_type="docx"):
+    """Move a cloud document to the Feishu recycle bin."""
+    return _api("DELETE", f"{BASE}/drive/v1/files/{file_token}?type={file_type}",
+                token=token)
 
 
 def sync_month_index(token, index_doc, months,
@@ -543,6 +550,11 @@ def publish_monthly(token, entries, state_path, domain="hw-native-sys.feishu.cn"
         save()  # persist pushed-set incrementally (crash-safe / idempotent)
 
     sync_month_index(token, state["index_doc"], state.get("months", {}), domain)
+    try:
+        from report_hub import sync_report_hub
+        sync_report_hub(token, state_path.parents[1], domain)
+    except ImportError:
+        pass
     return f"https://{domain}/docx/{state['index_doc']}"
 
 

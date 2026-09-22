@@ -1,0 +1,20 @@
+[Unit]
+Description=Simpler Feishu notification subscription listener
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mj
+Group=mj
+WorkingDirectory=/home/pypto-tools/pto-simpler-perf-tracker/app
+EnvironmentFile=/home/pypto-tools/pto-simpler-perf-tracker/config/perf-tracker.env
+Environment=PYTHONPATH=/data/miniconda3/envs/vllm/lib/python3.11/site-packages:/home/pypto-tools/pto-simpler-perf-tracker/app
+UnsetEnvironment=HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy
+ExecStart=/data/m00956180/.conda/envs/mjzkd/bin/python /home/pypto-tools/pto-simpler-perf-tracker/app/feishu_subscriber.py
+Restart=always
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

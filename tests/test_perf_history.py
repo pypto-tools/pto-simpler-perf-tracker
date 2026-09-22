@@ -32,6 +32,47 @@ bind phase=arena_h2d start_ns=9 dur_ns=1000000
         self.assertEqual(
             metrics["metrics"]["control_plane"]["min_us"], 5000.0)
 
+    def test_strace_bind_metrics_group_interleaved_ranks_by_pid_and_invocation(self):
+        def spans(pid, inv, host_orch, graph_upload, arena_h2d):
+            phases = {
+                "host_orch": host_orch,
+                "graph_upload": graph_upload,
+                "arena_h2d": arena_h2d,
+            }
+            rows = [
+                f"noise [STRACE] dur={dur} name=chip.run.bind.{phase} "
+                f"inv={inv} pid={pid}"
+                for phase, dur in phases.items()
+            ]
+            rows.append(
+                f"noise [STRACE] name=chip.run.bind inv={inv} pid={pid} dur=99")
+            return rows
+
+        # Rank 20's warm bind arrives before rank 10's cold bind. Dropping the
+        # first two global groups would therefore retain the wrong sample.
+        text = "\n".join(
+            spans(20, 1, 9000, 9000, 9000)
+            + spans(20, 2, 2000, 3000, 4000)
+            + spans(10, 1, 8000, 8000, 8000)
+            + spans(10, 2, 4000, 5000, 6000)
+        )
+
+        metrics = perf_history.parse_host_bind_metrics(text, rounds=2, ranks=2)
+
+        self.assertEqual(metrics["binds"], 4)
+        self.assertEqual(metrics["warm_binds"], 2)
+        self.assertEqual(metrics["metrics"]["host_orch"]["min_us"], 2.0)
+        self.assertEqual(metrics["metrics"]["host_orch"]["max_us"], 4.0)
+        self.assertEqual(metrics["metrics"]["control_plane"]["min_us"], 9.0)
+
+    def test_strace_bind_requires_root_completion_record(self):
+        text = """[STRACE] pid=7 inv=1 name=chip.run.bind.host_orch dur=1000
+[STRACE] pid=7 inv=1 name=chip.run.bind.graph_upload dur=1000
+[STRACE] pid=7 inv=1 name=chip.run.bind.arena_h2d dur=1000
+"""
+        with self.assertRaisesRegex(ValueError, "no complete"):
+            perf_history.parse_host_bind_metrics(text, rounds=1, ranks=1)
+
     def test_partial_control_plane_phase_rejects_truncated_host_log(self):
         text = """bind phase=host_orch start_ns=1 dur_ns=1000000
 bind phase=graph_upload start_ns=2 dur_ns=1000000

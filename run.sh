@@ -194,6 +194,18 @@ if [[ -s "$WORKDIR/perf_history.jsonl" ]]; then
     --shard-glob "$WORKDIR/perf_shard_*.log"
 else
   echo "[run] no results to process."
+fi
+
+# 4. After the normal daily performance window, scan yesterday's GitHub CI.
+# This is read-only and must never change the benchmark result. Backfills do
+# not trigger it because they are not the daily performance run.
+if [[ -z "$RECENT" ]]; then
+  STAGE="ci daily scan"
+  python "$SCRIPT_DIR/ci_daily_report.py" --notify || \
+    echo "[run] WARN: CI daily scan failed; benchmark result is unchanged" >&2
+fi
+
+if [[ ! -s "$WORKDIR/perf_history.jsonl" ]]; then
   if [[ "$BENCH_RC" -ne 0 ]]; then
     STAGE="benchmark validation"
     echo "[run] FAILED: benchmark batch produced no strict successes (rc=$BENCH_RC)" >&2
@@ -202,7 +214,7 @@ else
   exit 0
 fi
 
-# 4. Optional: publish to Feishu (per-month docs + index; prepend newest).
+# 5. Optional: publish to Feishu (per-month docs + index; prepend newest).
 # CONFIG_FILE was already sourced at the top of this script.
 if [[ "$PUSH" -eq 1 ]]; then
   STAGE="feishu publish"

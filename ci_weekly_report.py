@@ -133,6 +133,11 @@ def previous_week(now):
     return f"{year}-W{week:02d}"
 
 
+def current_week(now):
+    year, week, _ = now.astimezone(REPORT_TZ).date().isocalendar()
+    return f"{year}-W{week:02d}"
+
+
 def canonical_job(name):
     leaf = name.rsplit("/", 1)[-1].strip()
     for rendered, canonical in TARGET_JOBS.items():
@@ -318,6 +323,37 @@ def _fmt_delta(current, baseline):
     return f"{(current - baseline) / baseline * 100:+.1f}%"
 
 
+def _aligned_table(headers, rows, right_aligned=(), group_column=None):
+    """Render a compact monospace table with stable, readable columns."""
+    string_rows = [[str(value) for value in row] for row in rows]
+    widths = [
+        max(len(str(header)), *(len(row[index]) for row in string_rows))
+        for index, header in enumerate(headers)
+    ]
+    right_aligned = set(right_aligned)
+
+    def render(row):
+        cells = []
+        for index, value in enumerate(row):
+            cells.append(value.rjust(widths[index]) if index in right_aligned
+                         else value.ljust(widths[index]))
+        return "  ".join(cells).rstrip()
+
+    lines = [
+        render([str(header) for header in headers]),
+        "  ".join("-" * width for width in widths),
+    ]
+    previous_group = None
+    for row in string_rows:
+        group = row[group_column] if group_column is not None else None
+        if group_column is not None and previous_group is not None \
+                and group != previous_group:
+            lines.append("")
+        lines.append(render(row))
+        previous_group = group
+    return lines
+
+
 def aggregate_map(aggregates):
     return {(a["job"], a["os"], a["path"], a["runner_tier"]): a
             for a in aggregates}
@@ -363,23 +399,31 @@ def weekly_markdown(label, generated_at, aggregates):
         "## Job wall time",
         "",
         "```text",
-        "Job | OS | runner tier | success/total | p50 | p90",
     ]
+    wall_rows = []
     for item in aggregates:
-        lines.append(
-            f"{item['job']} | {item['os']} | {item['runner_tier']} | "
-            f"{item['n']}/{item['total']} | {_fmt_seconds(item['wall']['p50'])} | "
-            f"{_fmt_seconds(item['wall']['p90'])}")
-    lines += ["```", "", "## Phase timing", "", "```text",
-              "Job / OS / tier | phase | n | p50 | p90"]
+        wall_rows.append((
+            item["job"], item["os"], item["runner_tier"],
+            f"{item['n']}/{item['total']}", _fmt_seconds(item["wall"]["p50"]),
+            _fmt_seconds(item["wall"]["p90"]),
+        ))
+    lines += _aligned_table(
+        ("Job", "OS", "Runner tier", "Success", "P50", "P90"), wall_rows,
+        right_aligned=(3, 4, 5))
+    lines += ["```", "", "## Phase timing", "", "```text"]
+    phase_rows = []
     for item in aggregates:
-        name = f"{item['job']} / {item['os']} / {item['runner_tier']}"
         for phase in PHASES:
             stats = item["phases"].get(phase)
             if stats:
-                lines.append(
-                    f"{name} | {phase} | {stats['n']} | "
-                    f"{_fmt_seconds(stats['p50'])} | {_fmt_seconds(stats['p90'])}")
+                phase_rows.append((
+                    item["job"], item["os"], item["runner_tier"], phase,
+                    stats["n"], _fmt_seconds(stats["p50"]),
+                    _fmt_seconds(stats["p90"]),
+                ))
+    lines += _aligned_table(
+        ("Job", "OS", "Runner tier", "Phase", "N", "P50", "P90"),
+        phase_rows, right_aligned=(4, 5, 6), group_column=0)
     lines += ["```", "", "## Slowest successful runs", ""]
     for item in aggregates:
         name = f"{item['job']} / {item['os']} / {item['runner_tier']}"
@@ -570,7 +614,12 @@ def main():
     parser.add_argument("--repo", default="hw-native-sys/simpler")
     parser.add_argument("--workflow", default="ci.yml")
     parser.add_argument("--issue", type=int, default=1772)
-    parser.add_argument("--week", help="Beijing ISO week YYYY-Www; default previous week")
+    week_group = parser.add_mutually_exclusive_group()
+    week_group.add_argument(
+        "--week", help="Beijing ISO week YYYY-Www; default previous week")
+    week_group.add_argument(
+        "--current-week", action="store_true",
+        help="select the current Beijing ISO week (for late-Sunday scheduling)")
     parser.add_argument("--state", type=Path,
                         default=_state_dir() / "ci-weekly-state.json")
     parser.add_argument("--output-dir", type=Path,
@@ -588,7 +637,10 @@ def main():
     generated = network_utc()
     if generated is None:
         raise SystemExit("network time unavailable; refusing to generate a report")
-    label = args.week or previous_week(generated)
+    if args.current_week:
+        label = current_week(generated)
+    else:
+        label = args.week or previous_week(generated)
     start, end = week_bounds(label)
     generated_text = generated.astimezone(REPORT_TZ).strftime(
         "%Y-%m-%d %H:%M Asia/Shanghai")
@@ -643,6 +695,8 @@ def main():
     index_url, week_url = publish_feishu(
         report_md, label, state, args.state, total_index_doc, token, domain,
         force=args.force)
+    from report_hub import sync_report_hub
+    index_url = sync_report_hub(token, args.state.parent, domain)
     body = issue_markdown(label, generated_text, aggregates, baseline, index_url)
     upsert_issue_comment(client, args.repo, args.issue, body, state, args.state)
     state["weeks"][label]["issue_updated"] = True

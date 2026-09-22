@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 # Copyright (c) PyPTO Contributors.
-# Send a Feishu interactive card to a single configured recipient (a private
-# 1:1 message, not a group). Used by run.sh to alert on a failed perf run.
+# Send a Feishu interactive card to configured recipients (private 1:1 messages,
+# not a group). Used by run.sh to alert on a failed perf run.
 #
 # Reuses the app credentials and HTTP helper already in feishu_perf_report.py.
 # Recipient is read from the environment (set in .env):
 #   FEISHU_APP_ID, FEISHU_APP_SECRET  — the app (sender)
-#   NOTIFY_RECEIVE_ID                 — who to DM: an open_id (ou_...) or, if
+#   NOTIFY_RECEIVE_ID                 — legacy single recipient open_id (ou_...) or, if
 #                                       NOTIFY_RECEIVE_TYPE=email, a tenant email
 #   NOTIFY_RECEIVE_TYPE               — open_id (default) | email | user_id | union_id
+#   NOTIFY_SUBSCRIBERS_FILE           — JSON subscriber state; if present, all
+#                                       listed open_ids receive the notification.
 #
 # Exit codes: 0 sent; 3 recipient not configured (caller treats as soft —
 # a missing target must never turn a perf failure into a cron crash).
@@ -47,6 +49,31 @@ def send_card(app_id, app_secret, receive_id, receive_type, title, lines, status
     })
 
 
+def send_text(app_id, app_secret, receive_id, text):
+    token = tenant_token(app_id, app_secret)
+    url = f"{BASE}/im/v1/messages?receive_id_type=open_id"
+    _api("POST", url, token=token, body={
+        "receive_id": receive_id,
+        "msg_type": "text",
+        "content": json.dumps({"text": text}, ensure_ascii=False),
+    })
+
+
+def _subscriber_ids():
+    path = os.environ.get(
+        "NOTIFY_SUBSCRIBERS_FILE",
+        "/home/pypto-tools/pto-simpler-perf-tracker/state/subscribers.json",
+    )
+    try:
+        with open(path, encoding="utf-8") as stream:
+            data = json.load(stream)
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return []
+    subscribers = data.get("subscribers", {}) if isinstance(data, dict) else {}
+    return [key for key, value in subscribers.items()
+            if isinstance(key, str) and isinstance(value, dict)]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--title", required=True)
@@ -60,6 +87,21 @@ def main():
     rtype = os.environ.get("NOTIFY_RECEIVE_TYPE", "open_id")
     if not (app_id and app_secret):
         sys.exit("FEISHU_APP_ID / FEISHU_APP_SECRET not set")
+    subscriber_ids = _subscriber_ids()
+    if subscriber_ids:
+        failures = []
+        for subscriber_id in subscriber_ids:
+            try:
+                send_card(app_id, app_secret, subscriber_id, "open_id",
+                          args.title, args.lines, args.status)
+            except Exception as exc:
+                failures.append(f"{subscriber_id}: {exc}")
+        if failures:
+            print("some Feishu subscribers failed: " + "; ".join(failures),
+                  file=sys.stderr)
+            sys.exit(1)
+        print(f"feishu notify sent to {len(subscriber_ids)} subscribers")
+        return
     if not rid:
         # No target configured yet -> soft no-op so the caller doesn't crash.
         print("NOTIFY_RECEIVE_ID not set; skipping Feishu notify", file=sys.stderr)

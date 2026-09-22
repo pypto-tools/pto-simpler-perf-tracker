@@ -270,6 +270,13 @@ id 或 name，value 是对外展示的匿名档位；
 ./ci_weekly.sh --publish
 ```
 
+如需在周日深夜生成本周快照，使用 `--current-week`。该选项仅供显式的周日调度使用，
+不会改变手工运行时默认选择上一完整周的行为：
+
+```bash
+./ci_weekly.sh --current-week --publish
+```
+
 本地脱敏快照保存在 `<state>/ci-weekly/YYYY-Www.{json,md}`，发布状态保存在
 `<state>/ci-weekly-state.json`。重复执行同一周不会创建重复飞书文档或 issue 评论；确需
 按新数据重建某周文档时使用 `--week YYYY-Www --publish --force`。
@@ -277,12 +284,37 @@ id 或 name，value 是对外展示的匿名档位；
 选周和报告生成时间始终来自 HTTP `Date` 网络时间，包括显式传入 `--week` 的情况；
 网络时间不可用时直接退出，不回退到服务器时钟，也不会写飞书或 issue。
 
-本机时钟不可信时，可让现有网络时间调度器每天检查一次。周报模块自身按 week
-幂等，因此只有新一周会产生新文档：
+本机时钟不可信时，可让现有网络时间调度器在北京时间每周日 23:55 运行一次。
+`--current-week` 让本次任务统计即将结束的本周，周报模块自身仍按 week 幂等：
 
 ```cron
-*/30 * * * * python /home/pypto-tools/pto-simpler-perf-tracker/app/scheduled_run.py --lock /home/pypto-tools/pto-simpler-perf-tracker/state/ci-weekly.lock --stamp /home/pypto-tools/pto-simpler-perf-tracker/state/ci-weekly-daily.stamp -- /home/pypto-tools/pto-simpler-perf-tracker/app/ci_weekly.sh --publish >> /home/pypto-tools/pto-simpler-perf-tracker/logs/ci-weekly.log 2>&1
+CRON_TZ=Asia/Shanghai
+55 23 * * 0 python3 /home/pypto-tools/pto-simpler-perf-tracker/app/scheduled_run.py --window 23:50-00:10 --lock /home/pypto-tools/pto-simpler-perf-tracker/state/ci-weekly.lock --stamp /home/pypto-tools/pto-simpler-perf-tracker/state/ci-weekly-weekly.stamp -- /home/pypto-tools/pto-simpler-perf-tracker/app/ci_weekly.sh --current-week --publish >> /home/pypto-tools/pto-simpler-perf-tracker/logs/ci-weekly.log 2>&1
 ```
+
+## GitHub CI 每日偶现失败扫描
+
+`ci_daily.sh` 只读扫描前一个北京时间自然日的目标 CI job，并在后续运行中复查尚未确认的失败。它不会启动、重跑、取消或修改任何 GitHub Actions。
+
+```bash
+# 使用网络时间扫描前一个完整自然日
+./ci_daily.sh
+
+# 先用固定日期查看报告格式
+./ci_daily.sh --day 2026-09-20
+```
+
+结果保存在 `runtime/state/ci-daily/`（安装模式为部署目录下的 `state/ci-daily/`）。飞书发布按 ISO 周分文档：
+总索引只保留周入口，每周一个日报文档，避免单个文档无限增长。
+
+```text
+pending.json       # 等待后续重跑结果的失败
+2026-09-20.json     # 机器可读日报
+2026-09-20.md       # 人工查看日报
+feishu-state.json   # 飞书索引、月度文档和已发布日期
+```
+
+日报分为“重跑后恢复”、“待复查失败”和“多个 PR 的共性问题”三部分。共性问题只聚合最近 3 天的数据，按归一化后的 `pattern_id` 汇总，至少出现在两个不同 PR、分支或 commit 才展示，并列出变更数、CI run 数、出现次数和重跑恢复次数。启用通知后，日报会追加到独立的“简化 GitHub CI 每日扫描”Feishu 文档，私信附带该日报文档链接，不混入每周 CI 文档。日志只提取脱敏后的失败签名和少量证据行，不保存完整日志。
 
 ## NPU 故障恢复
 
@@ -349,11 +381,13 @@ cron 可以每 30 分钟轻量唤醒一次调度器；窗口外只做网络时�
 | --- | --- |
 | `run.sh` | 总入口：更新仓库、运行 benchmark、处理结果、可选发布 |
 | `ci_weekly.sh` | 加载私有配置并运行独立的 GitHub CI 周报模块 |
+| `ci_daily.sh` | 运行只读的每日 CI 偶现失败扫描 |
 | `perf_history_parallel.sh` | 将 commit 连续分片到多张 NPU，并负责续跑和换卡重试 |
 | `perf_history.py` | 为每个 commit 创建 worktree、构建，并采集 Device 与两个 HBG host case |
 | `perf_finalize.py` | 结果去重、设备标记、排序和相邻 commit Δ 计算 |
 | `feishu_perf_report.py` | 将处理后的结果发布到飞书文档或 Wiki |
 | `ci_weekly_report.py` | 采集 GitHub CI 时间并维护飞书周报、索引与 issue 看板 |
+| `ci_daily_report.py` | 采集前一天失败并确认后续重跑是否恢复 |
 | `notify_feishu.py` | 发送运行失败通知 |
 | `nettime.py` | 获取不依赖本机系统时钟的报告时间 |
 | `backfill.sh` | 历史数据回填辅助脚本 |

@@ -117,6 +117,10 @@ class DirectConnectionTests(unittest.TestCase):
         self.assertEqual(request.full_url,
                          "https://open.feishu.cn/open-apis/test")
 
+    def test_code_blocks_do_not_force_wrap(self):
+        block = MODULE._code_block("a very wide report")
+        self.assertFalse(block["code"]["style"]["wrap"])
+
 
 class MonthIndexTests(unittest.TestCase):
     def test_month_index_is_rebuilt_newest_first(self):

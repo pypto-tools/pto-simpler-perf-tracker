@@ -63,17 +63,18 @@ STAGE_DIR="$(mktemp -d "$TOOL_ROOT/.app.install.XXXXXX")"
 cleanup() { rm -rf -- "$STAGE_DIR"; }
 trap cleanup EXIT
 
-for file in run.sh ci_weekly.sh backfill.sh catchup_once.sh perf_history_parallel.sh perf_history.py \
-  perf_finalize.py feishu_perf_report.py ci_weekly_report.py notify_feishu.py nettime.py \
+for file in run.sh ci_weekly.sh ci_daily.sh backfill.sh catchup_once.sh perf_history_parallel.sh perf_history.py \
+  perf_finalize.py feishu_perf_report.py report_hub.py ci_weekly_report.py ci_daily_report.py notify_feishu.py feishu_subscriber.py nettime.py \
   scheduled_run.py runtime_paths.sh .env.example README.md; do
   install -m 0644 "$SOURCE_DIR/$file" "$STAGE_DIR/$file"
 done
-chmod 0755 "$STAGE_DIR/run.sh" "$STAGE_DIR/ci_weekly.sh" "$STAGE_DIR/backfill.sh" \
+chmod 0755 "$STAGE_DIR/run.sh" "$STAGE_DIR/ci_weekly.sh" "$STAGE_DIR/ci_daily.sh" "$STAGE_DIR/backfill.sh" \
   "$STAGE_DIR/catchup_once.sh" \
   "$STAGE_DIR/perf_history_parallel.sh" "$STAGE_DIR/perf_history.py" \
   "$STAGE_DIR/perf_finalize.py" "$STAGE_DIR/feishu_perf_report.py" \
-  "$STAGE_DIR/ci_weekly_report.py" \
-  "$STAGE_DIR/notify_feishu.py" "$STAGE_DIR/nettime.py" \
+  "$STAGE_DIR/report_hub.py" \
+  "$STAGE_DIR/ci_weekly_report.py" "$STAGE_DIR/ci_daily_report.py" \
+  "$STAGE_DIR/notify_feishu.py" "$STAGE_DIR/feishu_subscriber.py" "$STAGE_DIR/nettime.py" \
   "$STAGE_DIR/scheduled_run.py"
 chmod 0755 "$STAGE_DIR"
 
@@ -93,3 +94,12 @@ fi
 
 ln -sfn "$APP_DIR/run.sh" "$BIN_DIR/$COMMAND_NAME"
 echo "installed $COMMAND_NAME -> $APP_DIR/run.sh"
+
+if [[ "$(id -u)" -eq 0 && -d /run/systemd/system ]]; then
+  install -m 0644 "$SOURCE_DIR/feishu_subscriber.service" \
+    /etc/systemd/system/pto-simpler-feishu-subscriber.service
+  systemctl daemon-reload
+  systemctl enable pto-simpler-feishu-subscriber.service >/dev/null
+  systemctl restart pto-simpler-feishu-subscriber.service
+  echo "enabled pto-simpler-feishu-subscriber.service"
+fi

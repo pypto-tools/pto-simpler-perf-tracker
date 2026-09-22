@@ -38,6 +38,38 @@ class WeekAndStatisticTests(unittest.TestCase):
         self.assertEqual(MODULE.previous_week(before), "2026-W33")
         self.assertEqual(MODULE.previous_week(after), "2026-W34")
 
+    def test_current_week_uses_beijing_date(self):
+        before = dt.datetime(2026, 8, 23, 15, 59, tzinfo=dt.timezone.utc)
+        after = dt.datetime(2026, 8, 23, 16, 1, tzinfo=dt.timezone.utc)
+        self.assertEqual(MODULE.current_week(before), "2026-W34")
+        self.assertEqual(MODULE.current_week(after), "2026-W35")
+
+    def test_weekly_report_code_tables_are_aligned(self):
+        aggregates = [{
+            "job": "st-sim-a5", "os": "ubuntu", "path": "github-hosted",
+            "runner_tier": "github-standard", "n": 9, "total": 10,
+            "wall": {"p50": 123, "p90": 456},
+            "phases": {"test": {"n": 9, "p50": 80, "p90": 100}},
+            "slowest": [],
+        }, {
+            "job": "st-onboard-a5", "os": "linux", "path": "self-hosted",
+            "runner_tier": "standard", "n": 7, "total": 8,
+            "wall": {"p50": 234, "p90": 567},
+            "phases": {"setup": {"n": 7, "p50": 10, "p90": 20}},
+            "slowest": [],
+        }]
+        rendered = MODULE.weekly_markdown(
+            "2026-W35", "2026-09- multiline", aggregates)
+        code_blocks = rendered.split("```text")[1:]
+        self.assertEqual(len(code_blocks), 2)
+        for block in code_blocks:
+            lines = [line for line in block.split("```", 1)[0].strip().splitlines()
+                     if line]
+            self.assertEqual(len({len(line) for line in lines}), 1)
+            self.assertNotIn(" | ", block)
+        phase_block = code_blocks[1].split("```", 1)[0]
+        self.assertIn("\n\nst-onboard-a5", phase_block)
+
 
 class NormalizationTests(unittest.TestCase):
     def test_self_hosted_runner_is_replaced_by_tier(self):

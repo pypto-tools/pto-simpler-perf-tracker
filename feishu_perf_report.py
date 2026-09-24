@@ -31,8 +31,10 @@ import argparse
 import datetime
 import json
 import os
+from pathlib import Path
 import re
 import sys
+import tempfile
 import urllib.request
 import urllib.error
 
@@ -201,6 +203,24 @@ def docx_children_count(token, doc_id):
             return count
 
 
+def docx_root_sha_prefixes(token, doc_id):
+    """Return commit prefixes already present in root-level metadata blocks."""
+    prefixes, page = set(), None
+    while True:
+        url = (f"{BASE}/docx/v1/documents/{doc_id}/blocks/{doc_id}/children"
+               "?page_size=500" + (f"&page_token={page}" if page else ""))
+        data = _api("GET", url, token=token)["data"]
+        for item in data.get("items", []):
+            for element in (item.get("text") or {}).get("elements", []):
+                content = (element.get("text_run") or {}).get("content", "")
+                match = re.match(r"^([0-9a-f]{10})\s+·", content)
+                if match:
+                    prefixes.add(match.group(1))
+        page = data.get("page_token")
+        if not data.get("has_more"):
+            return prefixes
+
+
 def docx_append(token, doc_id, blocks):
     idx = docx_children_count(token, doc_id)
     url = f"{BASE}/docx/v1/documents/{doc_id}/blocks/{doc_id}/children"
@@ -233,7 +253,7 @@ def delete_file(token, file_token, file_type="docx"):
 
 
 def sync_month_index(token, index_doc, months,
-                     domain="hw-native-sys.feishu.cn"):
+                     domain="hw-native-sys.feishu.cn", month_parts=None):
     """Rewrite the small month index in newest-first order.
 
     Month documents can be created later than their neighbours when an old
@@ -241,10 +261,18 @@ def sync_month_index(token, index_doc, months,
     derive it from the month keys every time instead.
     """
     clear_doc(token, index_doc)
-    links = [
-        _text_block(f"📅 {month} → https://{domain}/docx/{months[month]}")
-        for month in sorted(months, reverse=True)
-    ]
+    links = []
+    month_parts = month_parts or {}
+    for month in sorted(months, reverse=True):
+        parts = month_parts.get(month) or [months[month]]
+        if len(parts) == 1:
+            links.append(_text_block(
+                f"📅 {month} → https://{domain}/docx/{parts[0]}"))
+            continue
+        for part_no in range(len(parts), 0, -1):
+            links.append(_text_block(
+                f"📅 {month} · 卷 {part_no} → "
+                f"https://{domain}/docx/{parts[part_no - 1]}"))
     if links:
         docx_append(token, index_doc, links)
 
@@ -263,6 +291,12 @@ ALERT_COLS = {"Device", "Total", "Sched", "Orch"}
 # the commit. Auto-scales across metrics of different magnitude and drops the
 # tiny-baseline noise (e.g. ~6µs Orch vs ~600µs others) without hardcoding µs.
 ALERT_MIN_FRAC = 0.2
+
+# Feishu rejects a document at roughly 40,000 total blocks.  A single commit
+# report contains many nested table-cell blocks, so a busy month can hit that
+# limit even when the number of root blocks still looks modest.  Rotate early
+# enough to leave room for a complete commit and for small manual additions.
+DOC_BLOCK_SOFT_LIMIT = 35_000
 
 
 def _median(xs):
@@ -433,9 +467,95 @@ def _commit_descendants(entry, prev, counter, prev_host=None):
 
 def _load_state(p):
     try:
-        return json.load(open(p))
+        with open(p) as stream:
+            return json.load(stream)
     except (OSError, ValueError):
         return {"index_doc": None, "months": {}, "pushed": []}
+
+
+def _save_state(path, state):
+    """Atomically persist publish state beside the destination file."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(state, stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+
+
+def _normalise_month_parts(state):
+    """Upgrade legacy month->doc state without touching existing documents.
+
+    Old documents have no trustworthy persisted total-block count.  Treat them
+    as sealed and start the next successful publish in a new part.  This avoids
+    an expensive full-document scan and never risks another write against a
+    document that may already be at Feishu's hard limit.
+    """
+    changed = False
+    parts = state.setdefault("month_parts", {})
+    counts = state.setdefault("doc_blocks", {})
+    sealed = state.setdefault("sealed_docs", [])
+    sealed_set = set(sealed)
+    for month, doc_id in state.setdefault("months", {}).items():
+        if month not in parts:
+            parts[month] = [doc_id]
+            changed = True
+        for part_doc in parts[month]:
+            if part_doc not in counts:
+                counts[part_doc] = DOC_BLOCK_SOFT_LIMIT
+                changed = True
+            if (part_doc not in sealed_set
+                    and counts[part_doc] >= DOC_BLOCK_SOFT_LIMIT):
+                sealed.append(part_doc)
+                sealed_set.add(part_doc)
+                changed = True
+    return changed
+
+
+def _entry_block_count(entry):
+    prev = entry.get("_prev_metrics")
+    prev_host = entry.get("_prev_host")
+    _top, descendants = _commit_descendants(entry, prev, [0], prev_host)
+    return len(descendants)
+
+
+def _suffix_for_budget(entries, budget):
+    """Return the largest oldest suffix that fits a forward-publish part."""
+    chosen = []
+    used, last_date = 0, object()
+    for entry in reversed(entries):
+        date = entry.get("date")
+        added = _entry_block_count(entry) + (date != last_date)
+        if used + added > budget:
+            return chosen
+        chosen.insert(0, entry)
+        used += added
+        last_date = date
+    return chosen
+
+
+def _prefix_for_budget(entries, budget):
+    """Return the largest newest prefix that fits an append/backfill part."""
+    chosen = []
+    used, last_date = 0, object()
+    for entry in entries:
+        date = entry.get("date")
+        added = _entry_block_count(entry) + (date != last_date)
+        if used + added > budget:
+            return chosen
+        chosen.append(entry)
+        used += added
+        last_date = date
+    return chosen
 
 
 def unpublished_with_metrics(entries, pushed):
@@ -492,19 +612,63 @@ def publish_monthly(token, entries, state_path, domain="hw-native-sys.feishu.cn"
         e["_prev_host"] = None if no_delta else (
             entries[i + 1].get("host") if i + 1 < len(entries) else None)
 
+    state_path = Path(state_path)
     state = _load_state(state_path)
 
     def save():
-        json.dump(state, open(state_path, "w"), indent=2)
+        _save_state(state_path, state)
+
+    if _normalise_month_parts(state):
+        save()
 
     if rebuild:
         # Overwrite: empty the existing month docs and forget what was pushed,
         # so the fresh ordered set fully replaces the old (gappy) content.
-        for m, did in state.get("months", {}).items():
-            print(f"clearing month doc {m} ({did}) ...")
-            clear_doc(token, did)
+        retained = {}
+        for m, docs in state.get("month_parts", {}).items():
+            for did in docs:
+                print(f"clearing month doc {m} ({did}) ...")
+                clear_doc(token, did)
+            if docs:
+                # Reuse the original stable monthly URL.  Extra volume docs
+                # become unreferenced rather than leaving empty links behind.
+                retained[m] = [docs[0]]
+        state["month_parts"] = retained
+        state["doc_blocks"] = {
+            docs[0]: 0 for docs in retained.values() if docs
+        }
+        state["sealed_docs"] = []
+        state["reconciled_docs"] = []
         state["pushed"] = []
         save()
+
+    if not rebuild:
+        # A previous version checkpointed only after an entire month batch.
+        # If the process failed mid-batch, some commits exist remotely but not
+        # in state.  Reconcile each sealed legacy document once before writing
+        # to its successor so recovery cannot duplicate those commits.
+        reconciled = state.setdefault("reconciled_docs", [])
+        reconciled_set = set(reconciled)
+        sealed_set = set(state.get("sealed_docs", []))
+        input_months = {(e.get("date") or "0000-00")[:7] for e in entries}
+        for month in sorted(input_months):
+            for doc_id in state.get("month_parts", {}).get(month, []):
+                if doc_id not in sealed_set or doc_id in reconciled_set:
+                    continue
+                remote = docx_root_sha_prefixes(token, doc_id)
+                pushed_list = state.setdefault("pushed", [])
+                pushed_set = set(pushed_list)
+                adopted = [e["sha"] for e in entries
+                           if (e.get("date") or "0000-00")[:7] == month
+                           and e["sha"] not in pushed_set
+                           and e["sha"][:10] in remote]
+                pushed_list.extend(adopted)
+                reconciled.append(doc_id)
+                reconciled_set.add(doc_id)
+                save()
+                if adopted:
+                    print(f"reconciled {len(adopted)} already-published "
+                          f"commit(s) from {month} legacy document")
     pushed = set(state.get("pushed", []))
 
     if not state.get("index_doc"):
@@ -524,7 +688,7 @@ def publish_monthly(token, entries, state_path, domain="hw-native-sys.feishu.cn"
         print(f"skipping {skipped} unmeasured commit(s); they remain retryable")
     if not fresh:
         sync_month_index(token, state["index_doc"], state.get("months", {}),
-                         domain)
+                         domain, state.get("month_parts"))
         print("nothing new to publish (all measured commits already pushed).")
         return f"https://{domain}/docx/{state['index_doc']}"
     months = {}
@@ -535,6 +699,8 @@ def publish_monthly(token, entries, state_path, domain="hw-native-sys.feishu.cn"
         if month not in state["months"]:
             did = docx_create(token, f"{title_prefix} {month}")
             state["months"][month] = did
+            state["month_parts"][month] = [did]
+            state["doc_blocks"][did] = 0
             save()  # persist before the (failable) link/table writes
             try:
                 set_doc_link_editable(token, did, "anyone")
@@ -542,14 +708,51 @@ def publish_monthly(token, entries, state_path, domain="hw-native-sys.feishu.cn"
                 pass
             print(f"created month doc {month}: "
                   f"https://{domain}/docx/{did}")
-        # rebuild writes into freshly-cleared docs, newest-on-top (like the
-        # forward run): prepend.
-        push_tables(token, state["months"][month], months[month],
-                    prepend=not (append and not rebuild))
-        state.setdefault("pushed", []).extend(e["sha"] for e in months[month])
-        save()  # persist pushed-set incrementally (crash-safe / idempotent)
+        pending = list(months[month])
+        forward = not (append and not rebuild)
+        while pending:
+            part_docs = state["month_parts"][month]
+            doc_id = part_docs[-1] if forward else part_docs[0]
+            used = state["doc_blocks"].get(doc_id, DOC_BLOCK_SOFT_LIMIT)
+            sealed = doc_id in set(state.get("sealed_docs", []))
+            budget = 0 if sealed else max(0, DOC_BLOCK_SOFT_LIMIT - used)
+            choose = _suffix_for_budget if forward else _prefix_for_budget
+            batch = choose(pending, budget) if budget else []
 
-    sync_month_index(token, state["index_doc"], state.get("months", {}), domain)
+            if not batch:
+                part_no = len(part_docs) + 1
+                doc_id = docx_create(
+                    token, f"{title_prefix} {month} · 卷 {part_no}")
+                if forward:
+                    part_docs.append(doc_id)
+                else:
+                    part_docs.insert(0, doc_id)
+                state["doc_blocks"][doc_id] = 0
+                save()
+                try:
+                    set_doc_link_editable(token, doc_id, "anyone")
+                except SystemExit:
+                    pass
+                print(f"created month part {month} #{part_no}: "
+                      f"https://{domain}/docx/{doc_id}")
+                budget = DOC_BLOCK_SOFT_LIMIT
+                batch = choose(pending, budget)
+
+            def checkpoint(entry, block_count):
+                state.setdefault("pushed", []).append(entry["sha"])
+                state["doc_blocks"][doc_id] = (
+                    state["doc_blocks"].get(doc_id, 0) + block_count)
+                save()
+
+            push_tables(token, doc_id, batch, prepend=forward,
+                        on_pushed=checkpoint)
+            if forward:
+                pending = pending[:-len(batch)]
+            else:
+                pending = pending[len(batch):]
+
+    sync_month_index(token, state["index_doc"], state.get("months", {}), domain,
+                     state.get("month_parts"))
     try:
         from report_hub import sync_report_hub
         sync_report_hub(token, state_path.parents[1], domain)
@@ -594,7 +797,8 @@ def _date_heading_block(date):
             "heading2": {"elements": _elements(f"📅 {date or '未知日期'}")}}
 
 
-def push_tables(token, doc_id, entries, dry_run=False, prepend=False):
+def push_tables(token, doc_id, entries, dry_run=False, prepend=False,
+                on_pushed=None):
     """Push date-grouped commit tables (native tables, newest first).
 
     prepend=True inserts at the very top (index 0, daily run lands above older
@@ -609,20 +813,26 @@ def push_tables(token, doc_id, entries, dry_run=False, prepend=False):
             entries[i + 1].get("metrics") if i + 1 < len(entries) else None)
         prev_host = e["_prev_host"] if "_prev_host" in e else (
             entries[i + 1].get("host") if i + 1 < len(entries) else None)
-        if e.get("date") != last_date:
+        add_date = e.get("date") != last_date
+        if add_date:
             last_date = e.get("date")
-            if not dry_run:
-                docx_append_descendant(token, doc_id, ["dh"],
-                                       [_date_heading_block(last_date)], idx)
-            idx += 1
         top, desc = _commit_descendants(e, prev, [0], prev_host)
         if dry_run:
             print(f"  [{e.get('date')}] {e['sha'][:10]} -> "
                   f"{len(top)} top, {len(desc)} descendants")
             continue
-        docx_append_descendant(token, doc_id, top, desc, idx)
-        idx += len(top)
+        children = list(top)
+        descendants = list(desc)
+        if add_date:
+            children.insert(0, "dh")
+            descendants.insert(0, _date_heading_block(last_date))
+        # One API call per commit makes the remote write atomic at commit
+        # granularity.  Checkpoint it locally immediately after the API returns.
+        docx_append_descendant(token, doc_id, children, descendants, idx)
+        idx += len(children)
         print(f"pushed {e['sha'][:10]} ({i + 1}/{len(entries)})")
+        if on_pushed:
+            on_pushed(e, len(descendants))
 
 
 def main():
@@ -672,7 +882,8 @@ def main():
         sys.exit("--md is only supported with --target docx")
 
     if args.from_processed:
-        entries = [json.loads(l) for l in open(args.from_processed) if l.strip()]
+        with open(args.from_processed) as stream:
+            entries = [json.loads(line) for line in stream if line.strip()]
         if args.limit:
             entries = entries[:args.limit]
         if args.dry_run:

@@ -41,6 +41,9 @@ def sync_report_hub(token, state_root, domain="hw-native-sys.feishu.cn"):
     performance_doc = performance.get("index_doc")
     weekly_doc = weekly.get("ci_index_doc")
     daily_doc = daily.get("index_doc") or daily.get("doc_id")
+    usage_state = _load(state_root / "usage-index.json", {})
+    usage_doc = (os.environ.get("FEISHU_USAGE_INDEX_DOCX_TOKEN")
+                 or usage_state.get("usage_index_doc"))
 
     def link(label, doc_id):
         target = f"https://{domain}/docx/{doc_id}" if doc_id else "（尚未生成）"
@@ -53,6 +56,9 @@ def sync_report_hub(token, state_root, domain="hw-native-sys.feishu.cn"):
                link("CI Job 周报索引", weekly_doc)]
     blocks += [feishu._heading_block(3, "每日 CI 报错"),
                link("CI 报错日报索引", daily_doc)]
+    if usage_doc:
+        blocks += [feishu._heading_block(3, "服务器使用情况"),
+                   link("各服务器使用情况", usage_doc)]
     feishu.clear_doc(token, hub_doc)
     feishu.docx_append(token, hub_doc, blocks)
     return f"https://{domain}/docx/{hub_doc}"
